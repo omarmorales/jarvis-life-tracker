@@ -1,0 +1,37 @@
+version: '3.8'
+
+services:
+  # Database Service: PostgreSQL
+  db:
+    image: postgres:16-alpine
+    container_name: jarvis_db
+    restart: always
+    environment:
+      POSTGRES_DB: life_tracker
+      POSTGRES_USER: jarvis_user
+      POSTGRES_PASSWORD: jarvis_secure_pass
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # Application Service: FastAPI API + Telegram Bot
+  web:
+    build: .
+    container_name: jarvis_web
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      # Instruct our database layer to use the co-hosted PostgreSQL service
+      DATABASE_URL: postgresql://jarvis_user:jarvis_secure_pass@db:5432/life_tracker
+      # Safely inject secrets from your local .env file
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      OPENAI_API_KEY: ${OPENAI_API_KEY}
+      ALLOWED_USER_ID: ${ALLOWED_USER_ID}
+    depends_on:
+      - db
+
+volumes:
+  # Named persistent volume to prevent data loss on container restarts
+  postgres_data:
