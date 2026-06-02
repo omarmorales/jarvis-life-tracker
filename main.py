@@ -175,6 +175,10 @@ tools = [
                         "type": "string",
                         "description": "A brief description or notes about the workout (e.g., 'Leg day', 'Ran 5k in 25 mins')."
                     },
+                    "metrics": {
+                        "type": "object",
+                        "description": "Dynamic metrics based on the type of workout. For Running/Walking: include 'distance' (float in km) and 'pace' (string e.g. '5:30 min/km') if mentioned. For Basketball: include 'shots_made' (int) and 'shots_attempted' (int) if mentioned. For Gym (weightlifting): include 'exercises' which is an array of objects, where each object contains: 'name' (string e.g. 'press de pecho'), 'weight' (float), 'unit' ('lbs' or 'kg'), 'sets' (int), and 'reps' (int)."
+                    },
                     "date": {
                         "type": "string",
                         "description": "Optional date of the workout in YYYY-MM-DD format if mentioned (e.g., yesterday). Defaults to today if null."
@@ -278,6 +282,58 @@ async def send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, te
         await context.bot.send_message(chat_id=chat_id, text=chunk)
 
 
+def format_workout_metrics(metrics: dict) -> str:
+    """Formats dynamic workout metrics into a user-friendly Spanish string."""
+    if not metrics:
+        return ""
+    
+    parts = []
+    
+    # Running/Walking
+    if "distance" in metrics:
+        dist = metrics["distance"]
+        parts.append(f"{dist} km")
+    if "pace" in metrics:
+        pace = metrics["pace"]
+        parts.append(f"a ritmo de {pace}")
+        
+    # Basketball
+    if "shots_made" in metrics or "shots_attempted" in metrics:
+        made = metrics.get("shots_made", "?")
+        att = metrics.get("shots_attempted", "?")
+        parts.append(f"tiros anotados: {made}/{att}")
+        
+    # Gym / Weightlifting
+    if "exercises" in metrics and isinstance(metrics["exercises"], list):
+        ex_parts = []
+        for ex in metrics["exercises"]:
+            name = ex.get("name", "ejercicio")
+            weight = ex.get("weight")
+            unit = ex.get("unit", "kg")
+            sets = ex.get("sets")
+            reps = ex.get("reps")
+            
+            ex_str = name
+            if weight is not None:
+                ex_str += f" con {weight} {unit}"
+            if sets is not None and reps is not None:
+                ex_str += f" ({sets}x{reps})"
+            elif sets is not None:
+                ex_str += f" ({sets} series)"
+            elif reps is not None:
+                ex_str += f" ({reps} reps)"
+            ex_parts.append(ex_str)
+        if ex_parts:
+            parts.append("ejercicios: " + ", ".join(ex_parts))
+            
+    # Generic fields that might have been stored as key-value pairs
+    for k, v in metrics.items():
+        if k not in ["distance", "pace", "shots_made", "shots_attempted", "exercises"]:
+            parts.append(f"{k}: {v}")
+            
+    return ", ".join(parts)
+
+
 # ==========================================
 # TELEGRAM COMMAND & MESSAGE HANDLERS
 # ==========================================
@@ -344,6 +400,12 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "If the user mentions an expense with a specific currency (e.g. pesos, MXN, dollars, USD, EUR), extract it and supply it to the tool. "
             "Otherwise, default to 'MXN'. When reporting expenses, always accompany amounts with their currency code (e.g. 115 MXN or $50 USD). "
             "If the user is tracking a workout or exercise, use the save_workout tool. "
+            "IMPORTANT: The save_workout tool has a dynamic 'metrics' parameter to store specific statistics based on the sport/workout type. "
+            "For Running or Walking: extract 'distance' (float in km, e.g. 5.0) and 'pace' (string, e.g. '5:30 min/km') if mentioned. "
+            "For Basketball: extract shooting statistics like 'shots_made' (integer) and 'shots_attempted' (integer) if mentioned. "
+            "For Gym/Weightlifting: extract 'exercises' as a list of objects, each containing 'name' (e.g. 'press de pecho'), 'weight' (float), 'unit' ('lbs' or 'kg'), 'sets' (int), and 'reps' (int). "
+            "For other sports (like Yoga), duration is enough, or extract other relevant numeric/text key-values. "
+            "Extract these details precisely and feed them to the 'metrics' parameter when calling 'save_workout'."
             "If the user asks about past expenses, use the get_expenses tool. "
             "If the user asks about past workouts, use the get_workout_logs tool. "
             "If they ask for a general summary of their life or logs, you can call both get_expenses and get_workout_logs. "
@@ -444,10 +506,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         duration_minutes=args.get("duration_minutes"),
                         intensity=args.get("intensity"),
                         description=args.get("description"),
+                        metrics=args.get("metrics"),
                         date_str=args.get("date")
                     )
                     
-                    tool_response = f"Successfully saved workout log: id={workout.id}, type={workout.workout_type}, duration={workout.duration_minutes or 'unknown'} mins, intensity={workout.intensity or 'unknown'}, date={workout.date.strftime('%Y-%m-%d')}"
+                    met_str = format_workout_metrics(workout.metrics)
+                    met_part = f", metrics={met_str}" if met_str else ""
+                    tool_response = f"Successfully saved workout log: id={workout.id}, type={workout.workout_type}, duration={workout.duration_minutes or 'unknown'} mins, intensity={workout.intensity or 'unknown'}{met_part}, date={workout.date.strftime('%Y-%m-%d')}"
                     user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "save_workout", "content": tool_response})
 
                 elif tool_call.function.name == "get_workout_logs":
@@ -461,7 +526,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     if not workouts:
                         tool_response = "No workout logs found for the given criteria."
                     else:
-                        lines = [f"- [ID: {w.id}] {w.date.strftime('%Y-%m-%d')}: {w.workout_type} ({w.duration_minutes or 0} mins, {w.intensity or 'normal'} intensity) - {w.description or 'No notes'}" for w in workouts]
+                        lines = []
+                        for w in workouts:
+                            met_str = format_workout_metrics(w.metrics)
+                            desc_part = f" - {w.description}" if w.description else ""
+                            metric_part = f" [{met_str}]" if met_str else ""
+                            duration_part = f" ({w.duration_minutes} mins)" if w.duration_minutes else ""
+                            lines.append(f"- [ID: {w.id}] {w.date.strftime('%Y-%m-%d')}: {w.workout_type}{duration_part}{metric_part}{desc_part}")
                         tool_response = f"Found {len(workouts)} workout logs:\n" + "\n".join(lines)
                         
                     user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "get_workout_logs", "content": tool_response})
@@ -652,6 +723,7 @@ def read_workouts(workout_type: str = None, days_back: int = 30):
                 "duration_minutes": w.duration_minutes,
                 "intensity": w.intensity,
                 "description": w.description,
+                "metrics": w.metrics,
                 "date": w.date.strftime("%Y-%m-%d %H:%M:%S")
             }
             for w in workouts
@@ -704,6 +776,7 @@ def read_summary():
                     "workout_type": w.workout_type,
                     "duration_minutes": w.duration_minutes,
                     "intensity": w.intensity,
+                    "metrics": w.metrics,
                     "date": w.date.strftime("%Y-%m-%d")
                 }
                 for w in workouts[:5]

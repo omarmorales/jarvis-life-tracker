@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, JSON
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 # Load environment variables
@@ -47,22 +47,31 @@ class WorkoutLog(Base):
     duration_minutes = Column(Integer, nullable=True)
     intensity = Column(String, nullable=True)  # e.g., low, medium, high
     description = Column(String, nullable=True)  # e.g., "Ran 5k", "Leg Day"
+    metrics = Column(JSON, nullable=True)  # Dynamic JSON metrics for dynamic sports
     date = Column(DateTime, default=lambda: datetime.now())
 
     def __repr__(self):
-        return f"<WorkoutLog(id={self.id}, type='{self.workout_type}', duration={self.duration_minutes}, intensity='{self.intensity}', date='{self.date.strftime('%Y-%m-%d')}')>"
+        return f"<WorkoutLog(id={self.id}, type='{self.workout_type}', duration={self.duration_minutes}, intensity='{self.intensity}', metrics={self.metrics}, date='{self.date.strftime('%Y-%m-%d')}')>"
 
 # Create all tables in the engine (equivalent to "CREATE TABLE IF NOT EXISTS")
 Base.metadata.create_all(engine)
 
-# Dynamic schema migration: add currency column to expenses table if it doesn't exist
+# Dynamic schema migration: add columns to tables if they don't exist
 from sqlalchemy import text
-with engine.connect() as conn:
-    try:
+
+# Update expenses table for currency (runs in isolated transaction)
+try:
+    with engine.begin() as conn:
         conn.execute(text("ALTER TABLE expenses ADD COLUMN currency VARCHAR DEFAULT 'MXN'"))
-        conn.commit()
-    except Exception:
-        pass  # Column already exists or database dialect handles it differently
+except Exception:
+    pass  # Column already exists or dialect handles it differently
+    
+# Update workout_logs table for metrics (runs in isolated transaction)
+try:
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE workout_logs ADD COLUMN metrics JSON"))
+except Exception:
+    pass  # Column already exists or dialect handles it differently
 
 # Create a configured "Session" class
 SessionLocal = sessionmaker(bind=engine)
@@ -176,7 +185,7 @@ def edit_expense(expense_id: int, amount: float = None, category: str = None, de
 # WORKOUT DATABASE HELPER METHODS
 # ==========================================
 
-def add_workout_log(workout_type: str, duration_minutes: int = None, intensity: str = None, description: str = None, date_str: str = None):
+def add_workout_log(workout_type: str, duration_minutes: int = None, intensity: str = None, description: str = None, metrics: dict = None, date_str: str = None):
     """Utility function to add a new workout log."""
     session = get_session()
     try:
@@ -192,6 +201,7 @@ def add_workout_log(workout_type: str, duration_minutes: int = None, intensity: 
             duration_minutes=duration_minutes,
             intensity=intensity,
             description=description,
+            metrics=metrics,
             date=dt
         )
         session.add(new_workout)
@@ -238,7 +248,7 @@ if __name__ == '__main__':
     print("Testing DB connection...")
     expense = add_expense(10.50, "Food", "Lunch at cafe", currency="USD")
     print(f"Added expense: {expense}")
-    workout = add_workout_log("Running", 30, "medium", "Evening jog")
+    workout = add_workout_log("Running", 30, "medium", "Evening jog", metrics={"distance": 5.0, "pace": "6:00 min/km"})
     print(f"Added workout: {workout}")
     print("Recent workouts:")
     for w in get_workout_logs():
