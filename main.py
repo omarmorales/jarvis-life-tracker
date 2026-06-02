@@ -7,8 +7,9 @@ from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 # FastAPI Imports
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Security, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.security.api_key import APIKeyHeader
 
 # Telegram Imports
 from telegram import Update
@@ -578,6 +579,32 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ==========================================
+# API TOKEN SECURITY CONFIGURATION
+# ==========================================
+
+API_TOKEN = os.getenv("API_TOKEN")
+api_key_header = APIKeyHeader(name="X-API-Token", auto_error=False)
+
+async def verify_api_token(api_key: str = Security(api_key_header)):
+    """Verifies the incoming X-API-Token header against the configured environment variable.
+    
+    Telegram Bot bypasses this check naturally because it calls the database functions
+    directly in-process rather than making HTTP network requests.
+    """
+    if not API_TOKEN or API_TOKEN == "your_secure_api_token_here":
+        logger.error("API Security Configuration Error: API_TOKEN environment variable is not configured.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Security configuration error: API_TOKEN is not configured on the backend."
+        )
+    if api_key != API_TOKEN:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid API Token. Please provide a valid token in the X-API-Token header."
+        )
+    return api_key
+
 
 # ==========================================
 # REST API ENDPOINTS
@@ -585,14 +612,14 @@ app.add_middleware(
 
 @app.get("/")
 def read_root():
-    """Service status checking endpoint."""
+    """Service status checking endpoint (Unprotected for hosted health checks)."""
     return {
         "status": "online",
         "service": "JARVIS Life Tracker Backend",
         "bot_active": tg_app is not None
     }
 
-@app.get("/api/expenses")
+@app.get("/api/expenses", dependencies=[Depends(verify_api_token)])
 def read_expenses(category: str = None, days_back: int = 30):
     """Retrieve expense logs, optionally filtered by category and days."""
     try:
@@ -613,7 +640,7 @@ def read_expenses(category: str = None, days_back: int = 30):
         logger.error(f"API Error fetching expenses: {e}")
         raise HTTPException(status_code=500, detail="Database error occurred.")
 
-@app.get("/api/workouts")
+@app.get("/api/workouts", dependencies=[Depends(verify_api_token)])
 def read_workouts(workout_type: str = None, days_back: int = 30):
     """Retrieve workout logs, optionally filtered by type and days."""
     try:
@@ -633,7 +660,7 @@ def read_workouts(workout_type: str = None, days_back: int = 30):
         logger.error(f"API Error fetching workouts: {e}")
         raise HTTPException(status_code=500, detail="Database error occurred.")
 
-@app.get("/api/summary")
+@app.get("/api/summary", dependencies=[Depends(verify_api_token)])
 def read_summary():
     """Retrieve aggregate stats over the past 7 days for the personal web dashboard."""
     try:
