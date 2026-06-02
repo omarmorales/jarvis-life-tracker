@@ -10,6 +10,20 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, HTTPException, Depends, Security, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
+from pydantic import BaseModel
+
+# Pydantic Schemas for Hobbies Catalog
+class HobbyCreate(BaseModel):
+    name: str
+    category: str = None
+    description: str = None
+    icon: str = None
+
+class HobbyUpdate(BaseModel):
+    name: str = None
+    category: str = None
+    description: str = None
+    icon: str = None
 
 # Telegram Imports
 from telegram import Update
@@ -784,6 +798,94 @@ def read_summary():
         }
     except Exception as e:
         logger.error(f"API Error fetching summary: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+
+# ==========================================
+# HOBBY ENDPOINTS
+# ==========================================
+
+@app.get("/api/hobbies", dependencies=[Depends(verify_api_token)])
+def read_hobbies(category: str = None):
+    """Retrieve hobbies, optionally filtered by category."""
+    try:
+        hobbies = database.get_hobbies(category=category)
+        return [
+            {
+                "id": h.id,
+                "name": h.name,
+                "category": h.category,
+                "description": h.description,
+                "icon": h.icon,
+                "date_added": h.date_added.strftime("%Y-%m-%d %H:%M:%S")
+            }
+            for h in hobbies
+        ]
+    except Exception as e:
+        logger.error(f"API Error fetching hobbies: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.post("/api/hobbies", status_code=status.HTTP_201_CREATED, dependencies=[Depends(verify_api_token)])
+def create_hobby(hobby: HobbyCreate):
+    """Create a new hobby log in the database."""
+    try:
+        new_hobby = database.add_hobby(
+            name=hobby.name,
+            category=hobby.category,
+            description=hobby.description,
+            icon=hobby.icon
+        )
+        return {
+            "id": new_hobby.id,
+            "name": new_hobby.name,
+            "category": new_hobby.category,
+            "description": new_hobby.description,
+            "icon": new_hobby.icon,
+            "date_added": new_hobby.date_added.strftime("%Y-%m-%d %H:%M:%S")
+        }
+    except Exception as e:
+        logger.error(f"API Error creating hobby: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.put("/api/hobbies/{hobby_id}", dependencies=[Depends(verify_api_token)])
+def update_hobby(hobby_id: int, hobby: HobbyUpdate):
+    """Update an existing hobby by its ID."""
+    try:
+        updated_hobby = database.edit_hobby(
+            hobby_id=hobby_id,
+            name=hobby.name,
+            category=hobby.category,
+            description=hobby.description,
+            icon=hobby.icon
+        )
+        if not updated_hobby:
+            raise HTTPException(status_code=404, detail="Hobby not found.")
+        return {
+            "id": updated_hobby.id,
+            "name": updated_hobby.name,
+            "category": updated_hobby.category,
+            "description": updated_hobby.description,
+            "icon": updated_hobby.icon,
+            "date_added": updated_hobby.date_added.strftime("%Y-%m-%d %H:%M:%S")
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error updating hobby: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.delete("/api/hobbies/{hobby_id}", dependencies=[Depends(verify_api_token)])
+def delete_hobby(hobby_id: int):
+    """Delete a hobby by its ID."""
+    try:
+        success = database.delete_hobby(hobby_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Hobby not found.")
+        return {"status": "success", "message": "Hobby deleted successfully."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error deleting hobby: {e}")
         raise HTTPException(status_code=500, detail="Database error occurred.")
 
 

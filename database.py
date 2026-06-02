@@ -53,6 +53,22 @@ class WorkoutLog(Base):
     def __repr__(self):
         return f"<WorkoutLog(id={self.id}, type='{self.workout_type}', duration={self.duration_minutes}, intensity='{self.intensity}', metrics={self.metrics}, date='{self.date.strftime('%Y-%m-%d')}')>"
 
+
+# Define the Hobby model
+class Hobby(Base):
+    __tablename__ = 'hobbies'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False)
+    category = Column(String, nullable=True)
+    description = Column(String, nullable=True)
+    icon = Column(String, nullable=True)
+    date_added = Column(DateTime, default=lambda: datetime.now())
+
+    def __repr__(self):
+        return f"<Hobby(id={self.id}, name='{self.name}', category='{self.category}', icon='{self.icon}')>"
+
+
 # Create all tables in the engine (equivalent to "CREATE TABLE IF NOT EXISTS")
 Base.metadata.create_all(engine)
 
@@ -239,6 +255,83 @@ def delete_workout_log(workout_id: int):
             session.commit()
             return True
         return False
+    finally:
+        session.close()
+
+
+# ==========================================
+# HOBBY DATABASE HELPER METHODS
+# ==========================================
+
+def add_hobby(name: str, category: str = None, description: str = None, icon: str = None):
+    """Utility function to add a new hobby."""
+    session = get_session()
+    try:
+        new_hobby = Hobby(
+            name=name,
+            category=category,
+            description=description,
+            icon=icon
+        )
+        session.add(new_hobby)
+        session.commit()
+        session.refresh(new_hobby)
+        return new_hobby
+    finally:
+        session.close()
+
+def get_hobbies(category: str = None):
+    """Utility function to get all hobbies, optionally filtered by category."""
+    session = get_session()
+    try:
+        query = session.query(Hobby)
+        if category:
+            query = query.filter(Hobby.category.ilike(f"%{category}%"))
+        return query.order_by(Hobby.name.asc()).all()
+    finally:
+        session.close()
+
+def get_hobby(hobby_id: int):
+    """Utility function to get a single hobby by ID."""
+    session = get_session()
+    try:
+        return session.query(Hobby).filter(Hobby.id == hobby_id).first()
+    finally:
+        session.close()
+
+def delete_hobby(hobby_id: int):
+    """Utility function to delete a hobby by ID."""
+    session = get_session()
+    try:
+        hobby = session.query(Hobby).filter(Hobby.id == hobby_id).first()
+        if hobby:
+            session.delete(hobby)
+            session.commit()
+            return True
+        return False
+    finally:
+        session.close()
+
+def edit_hobby(hobby_id: int, name: str = None, category: str = None, description: str = None, icon: str = None):
+    """Utility function to edit an existing hobby."""
+    session = get_session()
+    try:
+        hobby = session.query(Hobby).filter(Hobby.id == hobby_id).first()
+        if not hobby:
+            return None
+            
+        if name is not None:
+            hobby.name = name
+        if category is not None:
+            hobby.category = category
+        if description is not None:
+            hobby.description = description
+        if icon is not None:
+            hobby.icon = icon
+            
+        session.commit()
+        session.refresh(hobby)
+        return hobby
     finally:
         session.close()
 
