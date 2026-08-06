@@ -14,6 +14,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
 
+class ChatRequest(BaseModel):
+    message: str
+    chat_id: int = 1
+
 # Pydantic Schemas for Hobbies Catalog
 class HobbyCreate(BaseModel):
     name: str
@@ -374,201 +378,152 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "You can also ask me questions like 'How much did I spend this week?' or 'What workouts did I do recently?'"
     )
 
+async def run_jarvis_ai(chat_id: int, user_text: str) -> str:
+    """Core AI processing function returning JARVIS string response."""
+    mexico_tz = ZoneInfo("America/Mexico_City")
+    current_date = datetime.now(mexico_tz).strftime('%Y-%m-%d %H:%M:%S')
+    
+    if chat_id not in user_sessions:
+        user_sessions[chat_id] = [{"role": "system", "content": ""}]
+    
+    user_sessions[chat_id][0]["content"] = (
+        f"You are JARVIS, a unified personal tracking assistant. Current date and time in Mexico City (America/Mexico_City) is {current_date}. "
+        "If the user asks what time or date it is, respond using this Mexico City time. "
+        "You help the user log their physical workouts and their financial expenses in a single chat. "
+        "If the user is tracking an expense, use the save_expense tool. "
+        "IMPORTANT: The save_expense tool requires a payment_method (e.g., cash, card, transfer). "
+        "If the user DOES NOT specify how they paid, politely ask them before calling the tool. "
+        "If the user mentions an expense with a specific currency (e.g. pesos, MXN, dollars, USD, EUR), extract it and supply it to the tool. "
+        "Otherwise, default to 'MXN'. When reporting expenses, always accompany amounts with their currency code (e.g. 115 MXN or $50 USD). "
+        "If the user is tracking a workout or exercise, use the save_workout tool. "
+        "IMPORTANT: The save_workout tool has a dynamic 'metrics' parameter to store specific statistics based on the sport/workout type. "
+        "For Running or Walking: extract 'distance' (float in km, e.g. 5.0) and 'pace' (string, e.g. '5:30 min/km') if mentioned. "
+        "For Basketball: extract shooting statistics like 'shots_made' (integer) and 'shots_attempted' (integer) if mentioned. "
+        "For Gym/Weightlifting: extract 'exercises' as a list of objects, each containing 'name' (e.g. 'press de pecho'), 'weight' (float), 'unit' ('lbs' or 'kg'), 'sets' (int), and 'reps' (int). "
+        "For other sports (like Yoga), duration is enough, or extract other relevant numeric/text key-values. "
+        "Extract these details precisely and feed them to the 'metrics' parameter when calling 'save_workout'."
+        "If the user asks about past expenses, use the get_expenses tool. "
+        "If the user asks about past workouts, use the get_workout_logs tool. "
+        "If they ask for a general summary of their life or logs, you can call both get_expenses and get_workout_logs. "
+        "If the user asks to edit or delete an expense, use get_expenses first to find its ID. "
+        "BEFORE deleting an expense, ALWAYS ask the user for confirmation (e.g., 'Are you sure you want to delete the coffee?'). "
+        "Only call delete_expense after they say yes. Otherwise, reply conversationally."
+    )
+    
+    user_sessions[chat_id].append({"role": "user", "content": user_text})
+    if len(user_sessions[chat_id]) > 13:
+        user_sessions[chat_id] = [user_sessions[chat_id][0]] + user_sessions[chat_id][-12:]
+        
+    response = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=user_sessions[chat_id],
+        tools=tools,
+        tool_choice="auto"
+    )
+    
+    message = response.choices[0].message
+    if message.tool_calls:
+        user_sessions[chat_id].append(message)
+        for tool_call in message.tool_calls:
+            if tool_call.function.name == "save_expense":
+                args = json.loads(tool_call.function.arguments)
+                expense = database.add_expense(
+                    amount=args["amount"],
+                    category=args["category"],
+                    description=args["description"],
+                    payment_method=args.get("payment_method", "unknown"),
+                    currency=args.get("currency", "MXN"),
+                    date_str=args.get("date")
+                )
+                tool_response = f"Successfully saved expense: id={expense.id}, amount={expense.amount}, currency={expense.currency}, category={expense.category}, description={expense.description}, payment_method={expense.payment_method}, date={expense.date.strftime('%Y-%m-%d')}"
+                user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "save_expense", "content": tool_response})
+            elif tool_call.function.name == "get_expenses":
+                args = json.loads(tool_call.function.arguments)
+                expenses = database.get_expenses(category=args.get("category"), days_back=args.get("days_back", 30))
+                if not expenses:
+                    tool_response = "No expenses found for the given criteria."
+                else:
+                    lines = [f"- [ID: {e.id}] {e.date.strftime('%Y-%m-%d')}: {e.amount:.2f} {e.currency} for {e.description} ({e.category}) paid via {e.payment_method}" for e in expenses]
+                    curr_totals = {}
+                    for e in expenses:
+                        curr_totals[e.currency] = curr_totals.get(e.currency, 0.0) + e.amount
+                    totals_str = ", ".join([f"{amt:.2f} {curr}" for curr, amt in curr_totals.items()])
+                    tool_response = f"Found {len(expenses)} expenses totaling {totals_str}:\n" + "\n".join(lines)
+                user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "get_expenses", "content": tool_response})
+            elif tool_call.function.name == "delete_expense":
+                args = json.loads(tool_call.function.arguments)
+                success = database.delete_expense(args["expense_id"])
+                tool_response = "Expense deleted successfully." if success else "Expense not found."
+                user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "delete_expense", "content": tool_response})
+            elif tool_call.function.name == "edit_expense":
+                args = json.loads(tool_call.function.arguments)
+                expense = database.edit_expense(
+                    expense_id=args["expense_id"],
+                    amount=args.get("amount"),
+                    category=args.get("category"),
+                    description=args.get("description"),
+                    payment_method=args.get("payment_method"),
+                    currency=args.get("currency"),
+                    date_str=args.get("date")
+                )
+                tool_response = f"Successfully updated expense: id={expense.id}, amount={expense.amount}, currency={expense.currency}, category={expense.category}, description={expense.description}, payment_method={expense.payment_method}, date={expense.date.strftime('%Y-%m-%d')}" if expense else "Expense not found."
+                user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "edit_expense", "content": tool_response})
+            elif tool_call.function.name == "save_workout":
+                args = json.loads(tool_call.function.arguments)
+                workout = database.add_workout_log(
+                    workout_type=args["workout_type"],
+                    duration_minutes=args.get("duration_minutes"),
+                    intensity=args.get("intensity"),
+                    description=args.get("description"),
+                    metrics=args.get("metrics"),
+                    date_str=args.get("date")
+                )
+                met_str = format_workout_metrics(workout.metrics)
+                met_part = f", metrics={met_str}" if met_str else ""
+                tool_response = f"Successfully saved workout log: id={workout.id}, type={workout.workout_type}, duration={workout.duration_minutes or 'unknown'} mins, intensity={workout.intensity or 'unknown'}{met_part}, date={workout.date.strftime('%Y-%m-%d')}"
+                user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "save_workout", "content": tool_response})
+            elif tool_call.function.name == "get_workout_logs":
+                args = json.loads(tool_call.function.arguments)
+                workouts = database.get_workout_logs(workout_type=args.get("workout_type"), days_back=args.get("days_back", 30))
+                if not workouts:
+                    tool_response = "No workout logs found for the given criteria."
+                else:
+                    lines = []
+                    for w in workouts:
+                        met_str = format_workout_metrics(w.metrics)
+                        desc_part = f" - {w.description}" if w.description else ""
+                        metric_part = f" [{met_str}]" if met_str else ""
+                        duration_part = f" ({w.duration_minutes} mins)" if w.duration_minutes else ""
+                        lines.append(f"- [ID: {w.id}] {w.date.strftime('%Y-%m-%d')}: {w.workout_type}{duration_part}{metric_part}{desc_part}")
+                    tool_response = f"Found {len(workouts)} workout logs:\n" + "\n".join(lines)
+                user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "get_workout_logs", "content": tool_response})
+
+        final_response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=user_sessions[chat_id]
+        )
+        reply_text = final_response.choices[0].message.content
+        user_sessions[chat_id].append(final_response.choices[0].message)
+        return reply_text
+    else:
+        user_sessions[chat_id].append(message)
+        return message.content or "I couldn't understand that."
+
 async def process_jarvis_text(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str, processing_msg):
     """Core logic to send user_text to OpenAI GPT-4o-mini and handle tool calls."""
     chat_id = update.effective_chat.id
     try:
-        mexico_tz = ZoneInfo("America/Mexico_City")
-        current_date = datetime.now(mexico_tz).strftime('%Y-%m-%d %H:%M:%S')
-        
-        # Initialize session for this user if it doesn't exist
-        if chat_id not in user_sessions:
-            user_sessions[chat_id] = [
-                {
-                    "role": "system",
-                    "content": ""
-                }
-            ]
-        
-        # Always update system prompt with latest date and rules
-        user_sessions[chat_id][0]["content"] = (
-            f"You are JARVIS, a unified personal tracking assistant. Current date and time in Mexico City (America/Mexico_City) is {current_date}. "
-            "If the user asks what time or date it is, respond using this Mexico City time. "
-            "You help the user log their physical workouts and their financial expenses in a single chat. "
-            "If the user is tracking an expense, use the save_expense tool. "
-            "IMPORTANT: The save_expense tool requires a payment_method (e.g., cash, card, transfer). "
-            "If the user DOES NOT specify how they paid, politely ask them before calling the tool. "
-            "If the user mentions an expense with a specific currency (e.g. pesos, MXN, dollars, USD, EUR), extract it and supply it to the tool. "
-            "Otherwise, default to 'MXN'. When reporting expenses, always accompany amounts with their currency code (e.g. 115 MXN or $50 USD). "
-            "If the user is tracking a workout or exercise, use the save_workout tool. "
-            "IMPORTANT: The save_workout tool has a dynamic 'metrics' parameter to store specific statistics based on the sport/workout type. "
-            "For Running or Walking: extract 'distance' (float in km, e.g. 5.0) and 'pace' (string, e.g. '5:30 min/km') if mentioned. "
-            "For Basketball: extract shooting statistics like 'shots_made' (integer) and 'shots_attempted' (integer) if mentioned. "
-            "For Gym/Weightlifting: extract 'exercises' as a list of objects, each containing 'name' (e.g. 'press de pecho'), 'weight' (float), 'unit' ('lbs' or 'kg'), 'sets' (int), and 'reps' (int). "
-            "For other sports (like Yoga), duration is enough, or extract other relevant numeric/text key-values. "
-            "Extract these details precisely and feed them to the 'metrics' parameter when calling 'save_workout'."
-            "If the user asks about past expenses, use the get_expenses tool. "
-            "If the user asks about past workouts, use the get_workout_logs tool. "
-            "If they ask for a general summary of their life or logs, you can call both get_expenses and get_workout_logs. "
-            "If the user asks to edit or delete an expense, use get_expenses first to find its ID. "
-            "BEFORE deleting an expense, ALWAYS ask the user for confirmation (e.g., 'Are you sure you want to delete the coffee?'). "
-            "Only call delete_expense after they say yes. Otherwise, reply conversationally."
+        reply_text = await run_jarvis_ai(chat_id, user_text)
+        await send_long_message(
+            context=context,
+            chat_id=chat_id,
+            text=reply_text,
+            edit_message_id=processing_msg.message_id
         )
-        
-        # Add the new user message to history
-        user_sessions[chat_id].append({"role": "user", "content": user_text})
-        
-        # Keep history from growing too large (keep system prompt + last 12 messages)
-        if len(user_sessions[chat_id]) > 13:
-            user_sessions[chat_id] = [user_sessions[chat_id][0]] + user_sessions[chat_id][-12:]
-            
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=user_sessions[chat_id],
-            tools=tools,
-            tool_choice="auto"
-        )
-        
-        message = response.choices[0].message
-        
-        if message.tool_calls:
-            # Add the assistant's tool call message to the context
-            user_sessions[chat_id].append(message)
-            
-            for tool_call in message.tool_calls:
-                if tool_call.function.name == "save_expense":
-                    args = json.loads(tool_call.function.arguments)
-                    
-                    # Save to DB
-                    expense = database.add_expense(
-                        amount=args["amount"],
-                        category=args["category"],
-                        description=args["description"],
-                        payment_method=args.get("payment_method", "unknown"),
-                        currency=args.get("currency", "MXN"),
-                        date_str=args.get("date")
-                    )
-                    
-                    tool_response = f"Successfully saved expense: id={expense.id}, amount={expense.amount}, currency={expense.currency}, category={expense.category}, description={expense.description}, payment_method={expense.payment_method}, date={expense.date.strftime('%Y-%m-%d')}"
-                    user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "save_expense", "content": tool_response})
-                    
-                elif tool_call.function.name == "get_expenses":
-                    args = json.loads(tool_call.function.arguments)
-                    category = args.get("category")
-                    days_back = args.get("days_back", 30)
-                    
-                    # Query DB
-                    expenses = database.get_expenses(category=category, days_back=days_back)
-                    
-                    if not expenses:
-                        tool_response = "No expenses found for the given criteria."
-                    else:
-                        lines = [f"- [ID: {e.id}] {e.date.strftime('%Y-%m-%d')}: {e.amount:.2f} {e.currency} for {e.description} ({e.category}) paid via {e.payment_method}" for e in expenses]
-                        
-                        # Build currency sum dictionary
-                        curr_totals = {}
-                        for e in expenses:
-                            curr_totals[e.currency] = curr_totals.get(e.currency, 0.0) + e.amount
-                        totals_str = ", ".join([f"{amt:.2f} {curr}" for curr, amt in curr_totals.items()])
-                        
-                        tool_response = f"Found {len(expenses)} expenses totaling {totals_str}:\n" + "\n".join(lines)
-                        
-                    user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "get_expenses", "content": tool_response})
-                    
-                elif tool_call.function.name == "delete_expense":
-                    args = json.loads(tool_call.function.arguments)
-                    success = database.delete_expense(args["expense_id"])
-                    tool_response = "Expense deleted successfully." if success else "Expense not found."
-                    user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "delete_expense", "content": tool_response})
-                    
-                elif tool_call.function.name == "edit_expense":
-                    args = json.loads(tool_call.function.arguments)
-                    expense = database.edit_expense(
-                        expense_id=args["expense_id"],
-                        amount=args.get("amount"),
-                        category=args.get("category"),
-                        description=args.get("description"),
-                        payment_method=args.get("payment_method"),
-                        currency=args.get("currency"),
-                        date_str=args.get("date")
-                    )
-                    if expense:
-                        tool_response = f"Successfully updated expense: id={expense.id}, amount={expense.amount}, currency={expense.currency}, category={expense.category}, description={expense.description}, payment_method={expense.payment_method}, date={expense.date.strftime('%Y-%m-%d')}"
-                    else:
-                        tool_response = "Expense not found."
-                    user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "edit_expense", "content": tool_response})
-
-                elif tool_call.function.name == "save_workout":
-                    args = json.loads(tool_call.function.arguments)
-                    
-                    # Save to DB
-                    workout = database.add_workout_log(
-                        workout_type=args["workout_type"],
-                        duration_minutes=args.get("duration_minutes"),
-                        intensity=args.get("intensity"),
-                        description=args.get("description"),
-                        metrics=args.get("metrics"),
-                        date_str=args.get("date")
-                    )
-                    
-                    met_str = format_workout_metrics(workout.metrics)
-                    met_part = f", metrics={met_str}" if met_str else ""
-                    tool_response = f"Successfully saved workout log: id={workout.id}, type={workout.workout_type}, duration={workout.duration_minutes or 'unknown'} mins, intensity={workout.intensity or 'unknown'}{met_part}, date={workout.date.strftime('%Y-%m-%d')}"
-                    user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "save_workout", "content": tool_response})
-
-                elif tool_call.function.name == "get_workout_logs":
-                    args = json.loads(tool_call.function.arguments)
-                    workout_type = args.get("workout_type")
-                    days_back = args.get("days_back", 30)
-                    
-                    # Query DB
-                    workouts = database.get_workout_logs(workout_type=workout_type, days_back=days_back)
-                    
-                    if not workouts:
-                        tool_response = "No workout logs found for the given criteria."
-                    else:
-                        lines = []
-                        for w in workouts:
-                            met_str = format_workout_metrics(w.metrics)
-                            desc_part = f" - {w.description}" if w.description else ""
-                            metric_part = f" [{met_str}]" if met_str else ""
-                            duration_part = f" ({w.duration_minutes} mins)" if w.duration_minutes else ""
-                            lines.append(f"- [ID: {w.id}] {w.date.strftime('%Y-%m-%d')}: {w.workout_type}{duration_part}{metric_part}{desc_part}")
-                        tool_response = f"Found {len(workouts)} workout logs:\n" + "\n".join(lines)
-                        
-                    user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "get_workout_logs", "content": tool_response})
-
-            # Call OpenAI again with the tool response so it can generate a natural language reply
-            final_response = await client.chat.completions.create(
-                model="gpt-4o-mini",
-                messages=user_sessions[chat_id]
-            )
-            
-            # Save final response to history
-            user_sessions[chat_id].append(final_response.choices[0].message)
-            
-            await send_long_message(
-                context=context,
-                chat_id=update.effective_chat.id,
-                text=final_response.choices[0].message.content,
-                edit_message_id=processing_msg.message_id
-            )
-
-        else:
-            # If no tool was called, just reply with the AI's text
-            user_sessions[chat_id].append(message)
-            
-            await send_long_message(
-                context=context,
-                chat_id=update.effective_chat.id,
-                text=message.content or "I couldn't understand that.",
-                edit_message_id=processing_msg.message_id
-            )
-            
     except Exception as e:
         logger.error(f"Error processing message: {e}")
         await context.bot.edit_message_text(
-            chat_id=update.effective_chat.id,
+            chat_id=chat_id,
             message_id=processing_msg.message_id,
             text="Sorry, an error occurred while processing your message."
         )
@@ -762,6 +717,20 @@ def read_root():
         "service": "JARVIS Life Tracker Backend",
         "bot_active": tg_app is not None
     }
+
+@app.post("/api/chat", dependencies=[Depends(verify_api_token)])
+async def chat_endpoint(request: ChatRequest):
+    """Chat endpoint for Siri Shortcuts, web frontends, or HTTP clients."""
+    try:
+        reply = await run_jarvis_ai(request.chat_id, request.message)
+        return {
+            "status": "success",
+            "reply": reply,
+            "user_text": request.message
+        }
+    except Exception as e:
+        logger.error(f"API Error in /api/chat: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error processing chat message.")
 
 @app.get("/api/expenses", dependencies=[Depends(verify_api_token)])
 def read_expenses(category: str = None, days_back: int = 30):
