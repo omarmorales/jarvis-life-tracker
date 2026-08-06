@@ -3,6 +3,7 @@ import json
 import logging
 import asyncio
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
@@ -393,7 +394,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     processing_msg = await update.message.reply_text("Processing...")
     
     try:
-        current_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        mexico_tz = ZoneInfo("America/Mexico_City")
+        current_date = datetime.now(mexico_tz).strftime('%Y-%m-%d %H:%M:%S')
         
         # Initialize session for this user if it doesn't exist
         if chat_id not in user_sessions:
@@ -406,7 +408,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         # Always update system prompt with latest date and rules
         user_sessions[chat_id][0]["content"] = (
-            f"You are JARVIS, a unified personal tracking assistant. Current date and time is {current_date}. "
+            f"You are JARVIS, a unified personal tracking assistant. Current date and time in Mexico City (America/Mexico_City) is {current_date}. "
+            "If the user asks what time or date it is, respond using this Mexico City time. "
             "You help the user log their physical workouts and their financial expenses in a single chat. "
             "If the user is tracking an expense, use the save_expense tool. "
             "IMPORTANT: The save_expense tool requires a payment_method (e.g., cash, card, transfer). "

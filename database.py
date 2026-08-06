@@ -1,8 +1,16 @@
 import os
 from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from dotenv import load_dotenv
 from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, JSON
 from sqlalchemy.orm import declarative_base, sessionmaker
+
+# Timezone Configuration (CDMX)
+MEXICO_TZ = ZoneInfo("America/Mexico_City")
+
+def get_now_cdmx():
+    """Returns the current naive datetime in Mexico City timezone."""
+    return datetime.now(MEXICO_TZ).replace(tzinfo=None)
 
 # Load environment variables
 load_dotenv()
@@ -33,7 +41,7 @@ class Expense(Base):
     description = Column(String, nullable=True)
     payment_method = Column(String, default='unknown')
     currency = Column(String, default='MXN')  # Added currency support
-    date = Column(DateTime, default=lambda: datetime.now())
+    date = Column(DateTime, default=get_now_cdmx)
 
     def __repr__(self):
         return f"<Expense(id={self.id}, amount={self.amount}, currency='{self.currency}', category='{self.category}', payment='{self.payment_method}', date='{self.date.strftime('%Y-%m-%d')}')>"
@@ -48,7 +56,7 @@ class WorkoutLog(Base):
     intensity = Column(String, nullable=True)  # e.g., low, medium, high
     description = Column(String, nullable=True)  # e.g., "Ran 5k", "Leg Day"
     metrics = Column(JSON, nullable=True)  # Dynamic JSON metrics for dynamic sports
-    date = Column(DateTime, default=lambda: datetime.now())
+    date = Column(DateTime, default=get_now_cdmx)
 
     def __repr__(self):
         return f"<WorkoutLog(id={self.id}, type='{self.workout_type}', duration={self.duration_minutes}, intensity='{self.intensity}', metrics={self.metrics}, date='{self.date.strftime('%Y-%m-%d')}')>"
@@ -63,7 +71,7 @@ class Hobby(Base):
     category = Column(String, nullable=True)
     description = Column(String, nullable=True)
     icon = Column(String, nullable=True)
-    date_added = Column(DateTime, default=lambda: datetime.now())
+    date_added = Column(DateTime, default=get_now_cdmx)
 
     def __repr__(self):
         return f"<Hobby(id={self.id}, name='{self.name}', category='{self.category}', icon='{self.icon}')>"
@@ -105,7 +113,7 @@ def add_expense(amount: float, category: str, description: str, payment_method: 
     """Utility function to add a new expense."""
     session = get_session()
     try:
-        dt = datetime.now()
+        dt = get_now_cdmx()
         if date_str:
             try:
                 dt = datetime.strptime(date_str, '%Y-%m-%d')
@@ -146,7 +154,7 @@ def get_expenses(category: str = None, days_back: int = 30):
             query = query.filter(Expense.category.ilike(f"%{category}%"))
             
         if days_back:
-            start_date = datetime.now() - timedelta(days=days_back)
+            start_date = get_now_cdmx() - timedelta(days=days_back)
             query = query.filter(Expense.date >= start_date)
             
         return query.order_by(Expense.date.desc()).all()
@@ -205,7 +213,7 @@ def add_workout_log(workout_type: str, duration_minutes: int = None, intensity: 
     """Utility function to add a new workout log."""
     session = get_session()
     try:
-        dt = datetime.now()
+        dt = get_now_cdmx()
         if date_str:
             try:
                 dt = datetime.strptime(date_str, '%Y-%m-%d')
@@ -238,7 +246,7 @@ def get_workout_logs(workout_type: str = None, days_back: int = 30):
             query = query.filter(WorkoutLog.workout_type.ilike(f"%{workout_type}%"))
             
         if days_back:
-            start_date = datetime.now() - timedelta(days=days_back)
+            start_date = get_now_cdmx() - timedelta(days=days_back)
             query = query.filter(WorkoutLog.date >= start_date)
             
         return query.order_by(WorkoutLog.date.desc()).all()
