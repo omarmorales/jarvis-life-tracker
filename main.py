@@ -1,4 +1,5 @@
 import os
+import io
 import json
 import logging
 import asyncio
@@ -373,26 +374,9 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "You can also ask me questions like 'How much did I spend this week?' or 'What workouts did I do recently?'"
     )
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Process user message using OpenAI and trigger actions if needed."""
-    user = update.effective_user
-    
-    if not ALLOWED_USER_ID:
-        logger.error("Access denied: ALLOWED_USER_ID is not configured.")
-        await update.message.reply_text("Security Error: Bot is not configured. Please set ALLOWED_USER_ID in .env.")
-        return
-        
-    if user.id != ALLOWED_USER_ID:
-        logger.warning(f"Unauthorized access attempt by user {user.id} ({user.username or 'No Username'}).")
-        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
-        return
-
-    user_text = update.message.text
+async def process_jarvis_text(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str, processing_msg):
+    """Core logic to send user_text to OpenAI GPT-4o-mini and handle tool calls."""
     chat_id = update.effective_chat.id
-    
-    # Let the user know we are processing
-    processing_msg = await update.message.reply_text("Processing...")
-    
     try:
         mexico_tz = ZoneInfo("America/Mexico_City")
         current_date = datetime.now(mexico_tz).strftime('%Y-%m-%d %H:%M:%S')
@@ -589,6 +573,77 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text="Sorry, an error occurred while processing your message."
         )
 
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process incoming text message from Telegram."""
+    user = update.effective_user
+    
+    if not ALLOWED_USER_ID:
+        logger.error("Access denied: ALLOWED_USER_ID is not configured.")
+        await update.message.reply_text("Security Error: Bot is not configured. Please set ALLOWED_USER_ID in .env.")
+        return
+        
+    if user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by user {user.id} ({user.username or 'No Username'}).")
+        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        return
+
+    user_text = update.message.text
+    processing_msg = await update.message.reply_text("Processing...")
+    await process_jarvis_text(update, context, user_text, processing_msg)
+
+async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process incoming voice notes or audio messages using OpenAI Whisper API."""
+    user = update.effective_user
+    
+    if not ALLOWED_USER_ID:
+        logger.error("Access denied: ALLOWED_USER_ID is not configured.")
+        await update.message.reply_text("Security Error: Bot is not configured. Please set ALLOWED_USER_ID in .env.")
+        return
+        
+    if user.id != ALLOWED_USER_ID:
+        logger.warning(f"Unauthorized access attempt by user {user.id} ({user.username or 'No Username'}).")
+        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        return
+
+    voice_obj = update.message.voice or update.message.audio
+    if not voice_obj:
+        await update.message.reply_text("Could not read voice message payload.")
+        return
+
+    status_msg = await update.message.reply_text("🎙 Transcribing voice note...")
+
+    try:
+        # Download voice note file from Telegram
+        tg_file = await voice_obj.get_file()
+        file_bytes = await tg_file.download_as_bytearray()
+
+        # Wrap in BytesIO for OpenAI Whisper API
+        audio_stream = io.BytesIO(file_bytes)
+        audio_stream.name = "voice.ogg"
+
+        # Transcribe audio using Whisper
+        transcription = await client.audio.transcriptions.create(
+            model="whisper-1",
+            file=audio_stream
+        )
+
+        user_text = transcription.text.strip()
+        if not user_text:
+            await status_msg.edit_text("🎙 No se detectó ninguna voz comprensible en la nota de audio.")
+            return
+
+        # Show transcription to user and continue processing
+        try:
+            await status_msg.edit_text(f"🎙 *Transcription:* \"{user_text}\"\n\nProcessing...", parse_mode="Markdown")
+        except Exception:
+            await status_msg.edit_text(f"🎙 Transcription: \"{user_text}\"\n\nProcessing...")
+
+        await process_jarvis_text(update, context, user_text, status_msg)
+
+    except Exception as e:
+        logger.error(f"Error transcribing voice note: {e}")
+        await status_msg.edit_text("⚠️ Ocurrió un error al transcribir tu nota de voz. Por favor intenta de nuevo.")
+
 
 # ==========================================
 # FASTAPI APPLICATION SETUP & LIFECYCLE
@@ -618,6 +673,7 @@ async def start_telegram_bot():
         # Add Handlers
         tg_app.add_handler(CommandHandler("start", start))
         tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+        tg_app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_message))
         
         # Initialize and start polling
         await tg_app.initialize()
