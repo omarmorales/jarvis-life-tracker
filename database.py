@@ -116,7 +116,12 @@ def add_expense(amount: float, category: str, description: str, payment_method: 
         dt = get_now_cdmx()
         if date_str:
             try:
-                dt = datetime.strptime(date_str, '%Y-%m-%d')
+                parsed_dt = datetime.strptime(date_str, '%Y-%m-%d')
+                # If date_str equals today's date in CDMX, preserve current exact time
+                if parsed_dt.date() == dt.date():
+                    pass
+                else:
+                    dt = parsed_dt
             except ValueError:
                 pass  # Fallback to now
                 
@@ -216,7 +221,11 @@ def add_workout_log(workout_type: str, duration_minutes: int = None, intensity: 
         dt = get_now_cdmx()
         if date_str:
             try:
-                dt = datetime.strptime(date_str, '%Y-%m-%d')
+                parsed_dt = datetime.strptime(date_str, '%Y-%m-%d')
+                if parsed_dt.date() == dt.date():
+                    pass
+                else:
+                    dt = parsed_dt
             except ValueError:
                 pass  # Fallback to now
                 

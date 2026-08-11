@@ -139,7 +139,7 @@ tools = [
                     },
                     "date": {
                         "type": "string",
-                        "description": "Optional date of the expense in YYYY-MM-DD format if mentioned (e.g., yesterday). Defaults to today if null."
+                        "description": "ONLY supply if the user EXPLICITLY specified a past or specific date (e.g., 'yesterday', '2026-08-05'). Leave null/omitted for today's expenses so exact Mexico City date and time is automatically recorded."
                     }
                 },
                 "required": ["amount", "category", "payment_method", "description"],
@@ -236,7 +236,7 @@ tools = [
                     },
                     "date": {
                         "type": "string",
-                        "description": "Optional date of the workout in YYYY-MM-DD format if mentioned (e.g., yesterday). Defaults to today if null."
+                        "description": "ONLY supply if the user EXPLICITLY specified a past or specific date (e.g., 'yesterday', '2026-08-05'). Leave null/omitted for today's workouts so exact Mexico City date and time is automatically recorded."
                     }
                 },
                 "required": ["workout_type"],
@@ -466,6 +466,10 @@ async def run_jarvis_ai(chat_id: int, user_text: str) -> tuple[str, dict | None]
     user_sessions[chat_id][0]["content"] = (
         f"You are JARVIS, a unified personal tracking assistant. Current date and time in Mexico City (America/Mexico_City) is {current_date}. "
         "If the user asks what time or date it is, respond using this Mexico City time. "
+        "CRITICAL TIMEZONE & DATE RULE: All timestamps must correspond to Mexico City timezone. "
+        "When calling save_expense or save_workout for an entry happening today, DO NOT supply the 'date' parameter (leave it null/omitted). "
+        "The backend automatically records the exact current Mexico City timestamp when 'date' is omitted. "
+        "ONLY supply a string 'date' parameter if the user EXPLICITLY mentions a past/different date (e.g. 'ayer', 'el lunes pasado', 'el 5 de agosto'). "
         "You help the user log their physical workouts and their financial expenses in a single chat. "
         "If the user is tracking an expense, use the save_expense tool. "
         "IMPORTANT: The save_expense tool requires a payment_method (e.g., cash, card, transfer). "
