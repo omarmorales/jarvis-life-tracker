@@ -18,6 +18,40 @@ class ChatRequest(BaseModel):
     message: str
     chat_id: int = 1
 
+# Pydantic Schemas for Expenses
+class ExpenseCreate(BaseModel):
+    amount: float
+    category: str
+    description: str
+    payment_method: str = "unknown"
+    currency: str = "MXN"
+    date: str = None
+
+class ExpenseUpdate(BaseModel):
+    amount: float = None
+    category: str = None
+    description: str = None
+    payment_method: str = None
+    currency: str = None
+    date: str = None
+
+# Pydantic Schemas for Workouts
+class WorkoutCreate(BaseModel):
+    workout_type: str
+    duration_minutes: int = None
+    intensity: str = None
+    description: str = None
+    metrics: dict = None
+    date: str = None
+
+class WorkoutUpdate(BaseModel):
+    workout_type: str = None
+    duration_minutes: int = None
+    intensity: str = None
+    description: str = None
+    metrics: dict = None
+    date: str = None
+
 # Pydantic Schemas for Hobbies Catalog
 class HobbyCreate(BaseModel):
     name: str
@@ -32,11 +66,12 @@ class HobbyUpdate(BaseModel):
     icon: str = None
 
 # Telegram Imports
-from telegram import Update
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder,
     CommandHandler,
     MessageHandler,
+    CallbackQueryHandler,
     filters,
     ContextTypes
 )
@@ -227,6 +262,46 @@ tools = [
                 }
             },
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "edit_workout",
+            "description": "Edit an existing workout or exercise log in the database by its ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "workout_id": {
+                        "type": "integer",
+                        "description": "The unique ID of the workout log to edit."
+                    },
+                    "workout_type": { "type": "string", "description": "New workout type." },
+                    "duration_minutes": { "type": "integer", "description": "New duration in minutes." },
+                    "intensity": { "type": "string", "description": "New intensity (low, medium, high)." },
+                    "description": { "type": "string", "description": "New description or notes." },
+                    "metrics": { "type": "object", "description": "New dynamic metrics dictionary." },
+                    "date": { "type": "string", "description": "New date in YYYY-MM-DD format." }
+                },
+                "required": ["workout_id"],
+            },
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "delete_workout",
+            "description": "Delete a workout or exercise log from the database by its ID.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "workout_id": {
+                        "type": "integer",
+                        "description": "The unique ID of the workout log to delete."
+                    }
+                },
+                "required": ["workout_id"],
+            },
+        }
     }
 ]
 
@@ -274,11 +349,12 @@ def split_message(text: str, max_length: int = 4000) -> list[str]:
         
     return chunks
 
-async def send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, edit_message_id: int = None):
+async def send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, text: str, edit_message_id: int = None, reply_markup = None):
     """Sends a long message by splitting it into chunks.
     
     If edit_message_id is provided, the first chunk will edit that message.
     Subsequent chunks are sent as new messages.
+    reply_markup can be passed to attach InlineKeyboardButtons to the message.
     """
     chunks = split_message(text)
     if not chunks:
@@ -290,13 +366,14 @@ async def send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, te
             await context.bot.edit_message_text(
                 chat_id=chat_id,
                 message_id=edit_message_id,
-                text=first_chunk
+                text=first_chunk,
+                reply_markup=reply_markup
             )
         except Exception as e:
             logger.error(f"Failed to edit message {edit_message_id}: {e}. Sending as new message instead.")
-            await context.bot.send_message(chat_id=chat_id, text=first_chunk)
+            await context.bot.send_message(chat_id=chat_id, text=first_chunk, reply_markup=reply_markup)
     else:
-        await context.bot.send_message(chat_id=chat_id, text=first_chunk)
+        await context.bot.send_message(chat_id=chat_id, text=first_chunk, reply_markup=reply_markup)
         
     for chunk in chunks[1:]:
         await context.bot.send_message(chat_id=chat_id, text=chunk)
@@ -378,8 +455,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "You can also ask me questions like 'How much did I spend this week?' or 'What workouts did I do recently?'"
     )
 
-async def run_jarvis_ai(chat_id: int, user_text: str) -> str:
-    """Core AI processing function returning JARVIS string response."""
+async def run_jarvis_ai(chat_id: int, user_text: str) -> tuple[str, dict | None]:
+    """Core AI processing function returning JARVIS string response and created item details if any."""
     mexico_tz = ZoneInfo("America/Mexico_City")
     current_date = datetime.now(mexico_tz).strftime('%Y-%m-%d %H:%M:%S')
     
@@ -401,13 +478,15 @@ async def run_jarvis_ai(chat_id: int, user_text: str) -> str:
         "For Basketball: extract shooting statistics like 'shots_made' (integer) and 'shots_attempted' (integer) if mentioned. "
         "For Gym/Weightlifting: extract 'exercises' as a list of objects, each containing 'name' (e.g. 'press de pecho'), 'weight' (float), 'unit' ('lbs' or 'kg'), 'sets' (int), and 'reps' (int). "
         "For other sports (like Yoga), duration is enough, or extract other relevant numeric/text key-values. "
-        "Extract these details precisely and feed them to the 'metrics' parameter when calling 'save_workout'."
+        "Extract these details precisely and feed them to the 'metrics' parameter when calling 'save_workout'. "
         "If the user asks about past expenses, use the get_expenses tool. "
         "If the user asks about past workouts, use the get_workout_logs tool. "
         "If they ask for a general summary of their life or logs, you can call both get_expenses and get_workout_logs. "
-        "If the user asks to edit or delete an expense, use get_expenses first to find its ID. "
-        "BEFORE deleting an expense, ALWAYS ask the user for confirmation (e.g., 'Are you sure you want to delete the coffee?'). "
-        "Only call delete_expense after they say yes. Otherwise, reply conversationally."
+        "If the user asks to edit or delete an expense or workout without providing an ID, use get_expenses or get_workout_logs first to find the ID of the most recent log. "
+        "If the user asks to edit an expense, use edit_expense. "
+        "If the user asks to delete an expense, BEFORE deleting, ask for confirmation or call delete_expense if explicitly confirmed. "
+        "If the user asks to edit a workout/exercise, use edit_workout. "
+        "If the user asks to delete a workout/exercise, BEFORE deleting, ask for confirmation or call delete_workout if explicitly confirmed."
     )
     
     user_sessions[chat_id].append({"role": "user", "content": user_text})
@@ -421,6 +500,7 @@ async def run_jarvis_ai(chat_id: int, user_text: str) -> str:
         tool_choice="auto"
     )
     
+    last_created_item = None
     message = response.choices[0].message
     if message.tool_calls:
         user_sessions[chat_id].append(message)
@@ -435,6 +515,7 @@ async def run_jarvis_ai(chat_id: int, user_text: str) -> str:
                     currency=args.get("currency", "MXN"),
                     date_str=args.get("date")
                 )
+                last_created_item = {"type": "expense", "id": expense.id}
                 tool_response = f"Successfully saved expense: id={expense.id}, amount={expense.amount}, currency={expense.currency}, category={expense.category}, description={expense.description}, payment_method={expense.payment_method}, date={expense.date.strftime('%Y-%m-%d')}"
                 user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "save_expense", "content": tool_response})
             elif tool_call.function.name == "get_expenses":
@@ -478,6 +559,7 @@ async def run_jarvis_ai(chat_id: int, user_text: str) -> str:
                     metrics=args.get("metrics"),
                     date_str=args.get("date")
                 )
+                last_created_item = {"type": "workout", "id": workout.id}
                 met_str = format_workout_metrics(workout.metrics)
                 met_part = f", metrics={met_str}" if met_str else ""
                 tool_response = f"Successfully saved workout log: id={workout.id}, type={workout.workout_type}, duration={workout.duration_minutes or 'unknown'} mins, intensity={workout.intensity or 'unknown'}{met_part}, date={workout.date.strftime('%Y-%m-%d')}"
@@ -497,6 +579,24 @@ async def run_jarvis_ai(chat_id: int, user_text: str) -> str:
                         lines.append(f"- [ID: {w.id}] {w.date.strftime('%Y-%m-%d')}: {w.workout_type}{duration_part}{metric_part}{desc_part}")
                     tool_response = f"Found {len(workouts)} workout logs:\n" + "\n".join(lines)
                 user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "get_workout_logs", "content": tool_response})
+            elif tool_call.function.name == "edit_workout":
+                args = json.loads(tool_call.function.arguments)
+                workout = database.edit_workout_log(
+                    workout_id=args["workout_id"],
+                    workout_type=args.get("workout_type"),
+                    duration_minutes=args.get("duration_minutes"),
+                    intensity=args.get("intensity"),
+                    description=args.get("description"),
+                    metrics=args.get("metrics"),
+                    date_str=args.get("date")
+                )
+                tool_response = f"Successfully updated workout log: id={workout.id}, type={workout.workout_type}" if workout else "Workout log not found."
+                user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "edit_workout", "content": tool_response})
+            elif tool_call.function.name == "delete_workout":
+                args = json.loads(tool_call.function.arguments)
+                success = database.delete_workout_log(args["workout_id"])
+                tool_response = "Workout log deleted successfully." if success else "Workout log not found."
+                user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "delete_workout", "content": tool_response})
 
         final_response = await client.chat.completions.create(
             model="gpt-4o-mini",
@@ -504,21 +604,44 @@ async def run_jarvis_ai(chat_id: int, user_text: str) -> str:
         )
         reply_text = final_response.choices[0].message.content
         user_sessions[chat_id].append(final_response.choices[0].message)
-        return reply_text
+        return reply_text, last_created_item
     else:
         user_sessions[chat_id].append(message)
-        return message.content or "I couldn't understand that."
+        return (message.content or "I couldn't understand that."), None
 
 async def process_jarvis_text(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str, processing_msg):
     """Core logic to send user_text to OpenAI GPT-4o-mini and handle tool calls."""
     chat_id = update.effective_chat.id
     try:
-        reply_text = await run_jarvis_ai(chat_id, user_text)
+        reply_text, created_item = await run_jarvis_ai(chat_id, user_text)
+        
+        reply_markup = None
+        if created_item:
+            item_type = created_item["type"]
+            item_id = created_item["id"]
+            if item_type == "expense":
+                keyboard = [
+                    [
+                        InlineKeyboardButton("✏️ Modificar", callback_data=f"edit_exp:{item_id}"),
+                        InlineKeyboardButton("❌ Eliminar", callback_data=f"del_exp:{item_id}")
+                    ]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+            elif item_type == "workout":
+                keyboard = [
+                    [
+                        InlineKeyboardButton("✏️ Modificar", callback_data=f"edit_wo:{item_id}"),
+                        InlineKeyboardButton("❌ Eliminar", callback_data=f"del_wo:{item_id}")
+                    ]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+
         await send_long_message(
             context=context,
             chat_id=chat_id,
             text=reply_text,
-            edit_message_id=processing_msg.message_id
+            edit_message_id=processing_msg.message_id,
+            reply_markup=reply_markup
         )
     except Exception as e:
         logger.error(f"Error processing message: {e}")
@@ -527,6 +650,56 @@ async def process_jarvis_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             message_id=processing_msg.message_id,
             text="Sorry, an error occurred while processing your message."
         )
+
+async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle interactive inline keyboard button callbacks for editing/deleting items."""
+    query = update.callback_query
+    user = update.effective_user
+    
+    if not ALLOWED_USER_ID or user.id != ALLOWED_USER_ID:
+        await query.answer("Acceso no autorizado.", show_alert=True)
+        return
+
+    data = query.data
+    try:
+        if data.startswith("del_exp:"):
+            expense_id = int(data.split(":")[1])
+            success = database.delete_expense(expense_id)
+            await query.answer("Gasto eliminado exitosamente.")
+            if success:
+                await query.edit_message_text(f"❌ Gasto #{expense_id} eliminado exitosamente.")
+            else:
+                await query.edit_message_text(f"⚠️ El gasto #{expense_id} ya no existe o fue eliminado previamente.")
+                
+        elif data.startswith("del_wo:"):
+            workout_id = int(data.split(":")[1])
+            success = database.delete_workout_log(workout_id)
+            await query.answer("Ejercicio eliminado exitosamente.")
+            if success:
+                await query.edit_message_text(f"❌ Ejercicio #{workout_id} eliminado exitosamente.")
+            else:
+                await query.edit_message_text(f"⚠️ El ejercicio #{workout_id} ya no existe o fue eliminado previamente.")
+                
+        elif data.startswith("edit_exp:"):
+            expense_id = int(data.split(":")[1])
+            await query.answer()
+            await query.message.reply_text(
+                f"✏️ Para modificar este gasto (ID: {expense_id}), simplemente dime o envíame una nota de voz con el cambio, por ejemplo:\n"
+                f"• 'Modifica el gasto {expense_id} a $150 pesitos'\n"
+                f"• 'Cambia la categoría del gasto {expense_id} a Transporte'"
+            )
+            
+        elif data.startswith("edit_wo:"):
+            workout_id = int(data.split(":")[1])
+            await query.answer()
+            await query.message.reply_text(
+                f"✏️ Para modificar este ejercicio (ID: {workout_id}), simplemente dime o envíame una nota de voz con el cambio, por ejemplo:\n"
+                f"• 'Modifica el ejercicio {workout_id} a 45 minutos'\n"
+                f"• 'Cambia el ejercicio {workout_id} a correr 5k en 25 mins'"
+            )
+    except Exception as e:
+        logger.error(f"Error handling callback query: {e}")
+        await query.answer("Ocurrió un error al procesar la acción.", show_alert=True)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Process incoming text message from Telegram."""
@@ -629,6 +802,7 @@ async def start_telegram_bot():
         tg_app.add_handler(CommandHandler("start", start))
         tg_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
         tg_app.add_handler(MessageHandler(filters.VOICE | filters.AUDIO, handle_voice_message))
+        tg_app.add_handler(CallbackQueryHandler(handle_callback_query))
         
         # Initialize and start polling
         await tg_app.initialize()
@@ -722,10 +896,11 @@ def read_root():
 async def chat_endpoint(request: ChatRequest):
     """Chat endpoint for Siri Shortcuts, web frontends, or HTTP clients."""
     try:
-        reply = await run_jarvis_ai(request.chat_id, request.message)
+        reply, created_item = await run_jarvis_ai(request.chat_id, request.message)
         return {
             "status": "success",
             "reply": reply,
+            "created_item": created_item,
             "user_text": request.message
         }
     except Exception as e:
@@ -753,6 +928,75 @@ def read_expenses(category: str = None, days_back: int = 30):
         logger.error(f"API Error fetching expenses: {e}")
         raise HTTPException(status_code=500, detail="Database error occurred.")
 
+@app.post("/api/expenses", status_code=status.HTTP_201_CREATED, dependencies=[Depends(verify_api_token)])
+def create_expense(expense: ExpenseCreate):
+    """Create a new expense log in the database."""
+    try:
+        new_exp = database.add_expense(
+            amount=expense.amount,
+            category=expense.category,
+            description=expense.description,
+            payment_method=expense.payment_method,
+            currency=expense.currency,
+            date_str=expense.date
+        )
+        return {
+            "id": new_exp.id,
+            "amount": new_exp.amount,
+            "category": new_exp.category,
+            "description": new_exp.description,
+            "payment_method": new_exp.payment_method,
+            "currency": new_exp.currency,
+            "date": new_exp.date.strftime("%Y-%m-%d %H:%M:%S")
+        }
+    except Exception as e:
+        logger.error(f"API Error creating expense: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.put("/api/expenses/{expense_id}", dependencies=[Depends(verify_api_token)])
+def update_expense_endpoint(expense_id: int, expense: ExpenseUpdate):
+    """Update an existing expense by its ID."""
+    try:
+        updated = database.edit_expense(
+            expense_id=expense_id,
+            amount=expense.amount,
+            category=expense.category,
+            description=expense.description,
+            payment_method=expense.payment_method,
+            currency=expense.currency,
+            date_str=expense.date
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="Expense not found.")
+        return {
+            "id": updated.id,
+            "amount": updated.amount,
+            "category": updated.category,
+            "description": updated.description,
+            "payment_method": updated.payment_method,
+            "currency": updated.currency,
+            "date": updated.date.strftime("%Y-%m-%d %H:%M:%S")
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error updating expense: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.delete("/api/expenses/{expense_id}", dependencies=[Depends(verify_api_token)])
+def delete_expense_endpoint(expense_id: int):
+    """Delete an expense by its ID."""
+    try:
+        success = database.delete_expense(expense_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Expense not found.")
+        return {"status": "success", "message": "Expense deleted successfully."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error deleting expense: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
 @app.get("/api/workouts", dependencies=[Depends(verify_api_token)])
 def read_workouts(workout_type: str = None, days_back: int = 30):
     """Retrieve workout logs, optionally filtered by type and days."""
@@ -772,6 +1016,75 @@ def read_workouts(workout_type: str = None, days_back: int = 30):
         ]
     except Exception as e:
         logger.error(f"API Error fetching workouts: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.post("/api/workouts", status_code=status.HTTP_201_CREATED, dependencies=[Depends(verify_api_token)])
+def create_workout(workout: WorkoutCreate):
+    """Create a new workout log in the database."""
+    try:
+        new_w = database.add_workout_log(
+            workout_type=workout.workout_type,
+            duration_minutes=workout.duration_minutes,
+            intensity=workout.intensity,
+            description=workout.description,
+            metrics=workout.metrics,
+            date_str=workout.date
+        )
+        return {
+            "id": new_w.id,
+            "workout_type": new_w.workout_type,
+            "duration_minutes": new_w.duration_minutes,
+            "intensity": new_w.intensity,
+            "description": new_w.description,
+            "metrics": new_w.metrics,
+            "date": new_w.date.strftime("%Y-%m-%d %H:%M:%S")
+        }
+    except Exception as e:
+        logger.error(f"API Error creating workout: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.put("/api/workouts/{workout_id}", dependencies=[Depends(verify_api_token)])
+def update_workout_endpoint(workout_id: int, workout: WorkoutUpdate):
+    """Update an existing workout by its ID."""
+    try:
+        updated = database.edit_workout_log(
+            workout_id=workout_id,
+            workout_type=workout.workout_type,
+            duration_minutes=workout.duration_minutes,
+            intensity=workout.intensity,
+            description=workout.description,
+            metrics=workout.metrics,
+            date_str=workout.date
+        )
+        if not updated:
+            raise HTTPException(status_code=404, detail="Workout not found.")
+        return {
+            "id": updated.id,
+            "workout_type": updated.workout_type,
+            "duration_minutes": updated.duration_minutes,
+            "intensity": updated.intensity,
+            "description": updated.description,
+            "metrics": updated.metrics,
+            "date": updated.date.strftime("%Y-%m-%d %H:%M:%S")
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error updating workout: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.delete("/api/workouts/{workout_id}", dependencies=[Depends(verify_api_token)])
+def delete_workout_endpoint(workout_id: int):
+    """Delete a workout by its ID."""
+    try:
+        success = database.delete_workout_log(workout_id)
+        if not success:
+            raise HTTPException(status_code=404, detail="Workout not found.")
+        return {"status": "success", "message": "Workout deleted successfully."}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error deleting workout: {e}")
         raise HTTPException(status_code=500, detail="Database error occurred.")
 
 @app.get("/api/summary", dependencies=[Depends(verify_api_token)])

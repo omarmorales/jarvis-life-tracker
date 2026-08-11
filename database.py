@@ -266,6 +266,37 @@ def delete_workout_log(workout_id: int):
     finally:
         session.close()
 
+def edit_workout_log(workout_id: int, workout_type: str = None, duration_minutes: int = None, intensity: str = None, description: str = None, metrics: dict = None, date_str: str = None):
+    """Utility function to edit an existing workout log."""
+    session = get_session()
+    try:
+        workout = session.query(WorkoutLog).filter(WorkoutLog.id == workout_id).first()
+        if not workout:
+            return None
+            
+        if workout_type is not None:
+            workout.workout_type = workout_type
+        if duration_minutes is not None:
+            workout.duration_minutes = duration_minutes
+        if intensity is not None:
+            workout.intensity = intensity
+        if description is not None:
+            workout.description = description
+        if metrics is not None:
+            workout.metrics = metrics
+        if date_str is not None:
+            try:
+                workout.date = datetime.strptime(date_str, '%Y-%m-%d')
+            except ValueError:
+                pass
+                
+        session.commit()
+        session.refresh(workout)
+        return workout
+    finally:
+        session.close()
+
+
 
 # ==========================================
 # HOBBY DATABASE HELPER METHODS
