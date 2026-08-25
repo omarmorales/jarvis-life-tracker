@@ -358,7 +358,7 @@ async def send_long_message(context: ContextTypes.DEFAULT_TYPE, chat_id: int, te
     """
     chunks = split_message(text)
     if not chunks:
-        chunks = ["I couldn't understand that."]
+        chunks = ["No se pudo procesar la respuesta."]
         
     first_chunk = chunks[0]
     if edit_message_id:
@@ -440,19 +440,19 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
     if not ALLOWED_USER_ID:
-        logger.error("Access denied: ALLOWED_USER_ID is not configured.")
-        await update.message.reply_text("Security Error: Bot is not configured. Please set ALLOWED_USER_ID in .env.")
+        logger.error("Acceso denegado: ALLOWED_USER_ID no está configurado.")
+        await update.message.reply_text("⚠️ Error de seguridad: El bot no está configurado. Por favor define ALLOWED_USER_ID en el archivo .env.")
         return
         
     if user.id != ALLOWED_USER_ID:
-        logger.warning(f"Unauthorized access attempt by user {user.id} ({user.username or 'No Username'}).")
-        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        logger.warning(f"Intento de acceso no autorizado por el usuario {user.id} ({user.username or 'Sin Usuario'}).")
+        await update.message.reply_text(f"⛔ Lo siento, no estás autorizado para usar este bot. Tu ID de Telegram es `{user.id}`.")
         return
         
     await update.message.reply_html(
-        rf"Hi {user.mention_html()}! I am **JARVIS**, your unified AI personal life assistant. "
-        "Send me your expenses (e.g., 'Spent $5 on a coffee') or workouts (e.g., 'Ran 5k in 25 minutes') and I will track them! "
-        "You can also ask me questions like 'How much did I spend this week?' or 'What workouts did I do recently?'"
+        rf"¡Hola {user.mention_html()}! Soy **JARVIS**, tu asistente personal unificado de vida. "
+        "Envíame tus gastos (ej. 'Gasté $150 pesos en comida') o tus ejercicios (ej. 'Corrí 5k en 25 minutos') ¡y yo los registraré! "
+        "También puedes hacerme preguntas como '¿Cuánto gasté esta semana?' o '¿Qué ejercicios hice recientemente?'"
     )
 
 async def run_jarvis_ai(chat_id: int, user_text: str) -> tuple[str, dict | None]:
@@ -464,7 +464,7 @@ async def run_jarvis_ai(chat_id: int, user_text: str) -> tuple[str, dict | None]
         user_sessions[chat_id] = [{"role": "system", "content": ""}]
     
     user_sessions[chat_id][0]["content"] = (
-        f"You are JARVIS, a unified personal tracking assistant. Current date and time in Mexico City (America/Mexico_City) is {current_date}. "
+        f"You are JARVIS, a unified personal tracking assistant. Responde siempre en español de forma amable, clara y concisa. Current date and time in Mexico City (America/Mexico_City) is {current_date}. "
         "If the user asks what time or date it is, respond using this Mexico City time. "
         "CRITICAL TIMEZONE & DATE RULE: All timestamps must correspond to Mexico City timezone. "
         "When calling save_expense or save_workout for an entry happening today, DO NOT supply the 'date' parameter (leave it null/omitted). "
@@ -611,7 +611,7 @@ async def run_jarvis_ai(chat_id: int, user_text: str) -> tuple[str, dict | None]
         return reply_text, last_created_item
     else:
         user_sessions[chat_id].append(message)
-        return (message.content or "I couldn't understand that."), None
+        return (message.content or "No pude entender tu mensaje. Por favor intenta ser más específico."), None
 
 async def process_jarvis_text(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str, processing_msg):
     """Core logic to send user_text to OpenAI GPT-4o-mini and handle tool calls."""
@@ -648,12 +648,35 @@ async def process_jarvis_text(update: Update, context: ContextTypes.DEFAULT_TYPE
             reply_markup=reply_markup
         )
     except Exception as e:
-        logger.error(f"Error processing message: {e}")
-        await context.bot.edit_message_text(
-            chat_id=chat_id,
-            message_id=processing_msg.message_id,
-            text="Sorry, an error occurred while processing your message."
-        )
+        logger.exception("Error al procesar el mensaje con JARVIS:")
+        
+        err_msg = str(e)
+        if "AuthenticationError" in type(e).__name__ or "api_key" in err_msg.lower():
+            user_error = "⚠️ **Error de Autenticación con OpenAI**: La API key de OpenAI no es válida o no está configurada correctamente en el servidor."
+        elif "RateLimitError" in type(e).__name__ or "quota" in err_msg.lower() or "insufficient_quota" in err_msg.lower():
+            user_error = "⚠️ **Error de Saldo/Cuota en OpenAI**: La cuenta de OpenAI no tiene saldo disponible o superó el límite de peticiones."
+        elif "SQLAlchemyError" in type(e).__name__ or "OperationalError" in type(e).__name__ or "DatabaseError" in type(e).__name__:
+            user_error = f"⚠️ **Error de Base de Datos**: No se pudo consultar o guardar en la base de datos.\nDetalles: `{err_msg}`"
+        else:
+            user_error = f"⚠️ **Error al procesar tu mensaje**: {err_msg}\n\nPor favor intenta de nuevo o verifica los logs del servidor."
+
+        try:
+            await context.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=processing_msg.message_id,
+                text=user_error,
+                parse_mode="Markdown"
+            )
+        except Exception:
+            try:
+                await context.bot.edit_message_text(
+                    chat_id=chat_id,
+                    message_id=processing_msg.message_id,
+                    text=user_error
+                )
+            except Exception as edit_err:
+                logger.error(f"No se pudo editar el mensaje de estado ({edit_err}). Enviando como nuevo mensaje.")
+                await context.bot.send_message(chat_id=chat_id, text=user_error)
 
 async def handle_callback_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle interactive inline keyboard button callbacks for editing/deleting items."""
@@ -710,17 +733,17 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     
     if not ALLOWED_USER_ID:
-        logger.error("Access denied: ALLOWED_USER_ID is not configured.")
-        await update.message.reply_text("Security Error: Bot is not configured. Please set ALLOWED_USER_ID in .env.")
+        logger.error("Acceso denegado: ALLOWED_USER_ID no está configurado.")
+        await update.message.reply_text("⚠️ Error de seguridad: El bot no está configurado. Por favor define ALLOWED_USER_ID en el archivo .env.")
         return
         
     if user.id != ALLOWED_USER_ID:
-        logger.warning(f"Unauthorized access attempt by user {user.id} ({user.username or 'No Username'}).")
-        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        logger.warning(f"Intento de acceso no autorizado por el usuario {user.id} ({user.username or 'Sin Usuario'}).")
+        await update.message.reply_text(f"⛔ Lo siento, no estás autorizado para usar este bot. Tu ID de Telegram es `{user.id}`.")
         return
 
     user_text = update.message.text
-    processing_msg = await update.message.reply_text("Processing...")
+    processing_msg = await update.message.reply_text("⏳ Procesando...")
     await process_jarvis_text(update, context, user_text, processing_msg)
 
 async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -728,21 +751,21 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
     user = update.effective_user
     
     if not ALLOWED_USER_ID:
-        logger.error("Access denied: ALLOWED_USER_ID is not configured.")
-        await update.message.reply_text("Security Error: Bot is not configured. Please set ALLOWED_USER_ID in .env.")
+        logger.error("Acceso denegado: ALLOWED_USER_ID no está configurado.")
+        await update.message.reply_text("⚠️ Error de seguridad: El bot no está configurado. Por favor define ALLOWED_USER_ID en el archivo .env.")
         return
         
     if user.id != ALLOWED_USER_ID:
-        logger.warning(f"Unauthorized access attempt by user {user.id} ({user.username or 'No Username'}).")
-        await update.message.reply_text("Sorry, you are not authorized to use this bot.")
+        logger.warning(f"Intento de acceso no autorizado por el usuario {user.id} ({user.username or 'Sin Usuario'}).")
+        await update.message.reply_text(f"⛔ Lo siento, no estás autorizado para usar este bot. Tu ID de Telegram es `{user.id}`.")
         return
 
     voice_obj = update.message.voice or update.message.audio
     if not voice_obj:
-        await update.message.reply_text("Could not read voice message payload.")
+        await update.message.reply_text("⚠️ No se pudo leer el archivo de audio recibido.")
         return
 
-    status_msg = await update.message.reply_text("🎙 Transcribing voice note...")
+    status_msg = await update.message.reply_text("🎙 Transcribiendo nota de voz...")
 
     try:
         # Download voice note file from Telegram
@@ -766,15 +789,22 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         # Show transcription to user and continue processing
         try:
-            await status_msg.edit_text(f"🎙 *Transcription:* \"{user_text}\"\n\nProcessing...", parse_mode="Markdown")
+            await status_msg.edit_text(f"🎙 *Transcripción:* \"{user_text}\"\n\n⏳ Procesando...", parse_mode="Markdown")
         except Exception:
-            await status_msg.edit_text(f"🎙 Transcription: \"{user_text}\"\n\nProcessing...")
+            await status_msg.edit_text(f"🎙 Transcripción: \"{user_text}\"\n\n⏳ Procesando...")
 
         await process_jarvis_text(update, context, user_text, status_msg)
 
     except Exception as e:
-        logger.error(f"Error transcribing voice note: {e}")
-        await status_msg.edit_text("⚠️ Ocurrió un error al transcribir tu nota de voz. Por favor intenta de nuevo.")
+        logger.exception("Error al transcribir la nota de voz con Whisper:")
+        err_msg = str(e)
+        if "Quota" in err_msg or "quota" in err_msg.lower() or "RateLimit" in type(e).__name__:
+            detail = "La cuenta de OpenAI no tiene saldo suficiente o superó el límite."
+        elif "Authentication" in type(e).__name__ or "api_key" in err_msg.lower():
+            detail = "La API Key de OpenAI no es válida."
+        else:
+            detail = err_msg
+        await status_msg.edit_text(f"⚠️ Ocurrió un error al transcribir tu nota de voz: {detail}\nPor favor intenta de nuevo.")
 
 
 # ==========================================
