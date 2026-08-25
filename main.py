@@ -520,25 +520,25 @@ async def run_jarvis_ai(chat_id: int, user_text: str) -> tuple[str, dict | None]
                     date_str=args.get("date")
                 )
                 last_created_item = {"type": "expense", "id": expense.id}
-                tool_response = f"Successfully saved expense: id={expense.id}, amount={expense.amount}, currency={expense.currency}, category={expense.category}, description={expense.description}, payment_method={expense.payment_method}, date={expense.date.strftime('%Y-%m-%d')}"
+                tool_response = f"Gasto guardado exitosamente: id={expense.id}, monto={expense.amount}, moneda={expense.currency}, categoría={expense.category}, descripción={expense.description}, método={expense.payment_method}, fecha={expense.date.strftime('%Y-%m-%d')}"
                 user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "save_expense", "content": tool_response})
             elif tool_call.function.name == "get_expenses":
                 args = json.loads(tool_call.function.arguments)
                 expenses = database.get_expenses(category=args.get("category"), days_back=args.get("days_back", 30))
                 if not expenses:
-                    tool_response = "No expenses found for the given criteria."
+                    tool_response = "No se encontraron gastos con los criterios indicados."
                 else:
-                    lines = [f"- [ID: {e.id}] {e.date.strftime('%Y-%m-%d')}: {e.amount:.2f} {e.currency} for {e.description} ({e.category}) paid via {e.payment_method}" for e in expenses]
+                    lines = [f"- [ID: {e.id}] {e.date.strftime('%Y-%m-%d')}: {e.amount:.2f} {e.currency} en {e.description} ({e.category}) pagado con {e.payment_method}" for e in expenses]
                     curr_totals = {}
                     for e in expenses:
                         curr_totals[e.currency] = curr_totals.get(e.currency, 0.0) + e.amount
                     totals_str = ", ".join([f"{amt:.2f} {curr}" for curr, amt in curr_totals.items()])
-                    tool_response = f"Found {len(expenses)} expenses totaling {totals_str}:\n" + "\n".join(lines)
+                    tool_response = f"Se encontraron {len(expenses)} gastos por un total de {totals_str}:\n" + "\n".join(lines)
                 user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "get_expenses", "content": tool_response})
             elif tool_call.function.name == "delete_expense":
                 args = json.loads(tool_call.function.arguments)
                 success = database.delete_expense(args["expense_id"])
-                tool_response = "Expense deleted successfully." if success else "Expense not found."
+                tool_response = "Gasto eliminado exitosamente." if success else "Gasto no encontrado."
                 user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "delete_expense", "content": tool_response})
             elif tool_call.function.name == "edit_expense":
                 args = json.loads(tool_call.function.arguments)
@@ -551,7 +551,7 @@ async def run_jarvis_ai(chat_id: int, user_text: str) -> tuple[str, dict | None]
                     currency=args.get("currency"),
                     date_str=args.get("date")
                 )
-                tool_response = f"Successfully updated expense: id={expense.id}, amount={expense.amount}, currency={expense.currency}, category={expense.category}, description={expense.description}, payment_method={expense.payment_method}, date={expense.date.strftime('%Y-%m-%d')}" if expense else "Expense not found."
+                tool_response = f"Gasto actualizado exitosamente: id={expense.id}, monto={expense.amount}, moneda={expense.currency}, categoría={expense.category}, descripción={expense.description}, método={expense.payment_method}, fecha={expense.date.strftime('%Y-%m-%d')}" if expense else "Gasto no encontrado."
                 user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "edit_expense", "content": tool_response})
             elif tool_call.function.name == "save_workout":
                 args = json.loads(tool_call.function.arguments)
@@ -565,14 +565,14 @@ async def run_jarvis_ai(chat_id: int, user_text: str) -> tuple[str, dict | None]
                 )
                 last_created_item = {"type": "workout", "id": workout.id}
                 met_str = format_workout_metrics(workout.metrics)
-                met_part = f", metrics={met_str}" if met_str else ""
-                tool_response = f"Successfully saved workout log: id={workout.id}, type={workout.workout_type}, duration={workout.duration_minutes or 'unknown'} mins, intensity={workout.intensity or 'unknown'}{met_part}, date={workout.date.strftime('%Y-%m-%d')}"
+                met_part = f", métricas={met_str}" if met_str else ""
+                tool_response = f"Ejercicio guardado exitosamente: id={workout.id}, tipo={workout.workout_type}, duración={workout.duration_minutes or 'desconocida'} mins, intensidad={workout.intensity or 'desconocida'}{met_part}, fecha={workout.date.strftime('%Y-%m-%d')}"
                 user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "save_workout", "content": tool_response})
             elif tool_call.function.name == "get_workout_logs":
                 args = json.loads(tool_call.function.arguments)
                 workouts = database.get_workout_logs(workout_type=args.get("workout_type"), days_back=args.get("days_back", 30))
                 if not workouts:
-                    tool_response = "No workout logs found for the given criteria."
+                    tool_response = "No se encontraron registros de ejercicio con los criterios indicados."
                 else:
                     lines = []
                     for w in workouts:
@@ -581,7 +581,7 @@ async def run_jarvis_ai(chat_id: int, user_text: str) -> tuple[str, dict | None]
                         metric_part = f" [{met_str}]" if met_str else ""
                         duration_part = f" ({w.duration_minutes} mins)" if w.duration_minutes else ""
                         lines.append(f"- [ID: {w.id}] {w.date.strftime('%Y-%m-%d')}: {w.workout_type}{duration_part}{metric_part}{desc_part}")
-                    tool_response = f"Found {len(workouts)} workout logs:\n" + "\n".join(lines)
+                    tool_response = f"Se encontraron {len(workouts)} registros de ejercicio:\n" + "\n".join(lines)
                 user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "get_workout_logs", "content": tool_response})
             elif tool_call.function.name == "edit_workout":
                 args = json.loads(tool_call.function.arguments)
@@ -594,12 +594,12 @@ async def run_jarvis_ai(chat_id: int, user_text: str) -> tuple[str, dict | None]
                     metrics=args.get("metrics"),
                     date_str=args.get("date")
                 )
-                tool_response = f"Successfully updated workout log: id={workout.id}, type={workout.workout_type}" if workout else "Workout log not found."
+                tool_response = f"Ejercicio actualizado exitosamente: id={workout.id}, tipo={workout.workout_type}" if workout else "Ejercicio no encontrado."
                 user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "edit_workout", "content": tool_response})
             elif tool_call.function.name == "delete_workout":
                 args = json.loads(tool_call.function.arguments)
                 success = database.delete_workout_log(args["workout_id"])
-                tool_response = "Workout log deleted successfully." if success else "Workout log not found."
+                tool_response = "Registro de ejercicio eliminado exitosamente." if success else "Registro de ejercicio no encontrado."
                 user_sessions[chat_id].append({"role": "tool", "tool_call_id": tool_call.id, "name": "delete_workout", "content": tool_response})
 
         final_response = await client.chat.completions.create(
