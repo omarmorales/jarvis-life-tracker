@@ -65,6 +65,49 @@ class HobbyUpdate(BaseModel):
     description: str = None
     icon: str = None
 
+# Pydantic Schemas for Basketball Management
+class TournamentCreate(BaseModel):
+    name: str
+    team_name: str = "Mi Equipo"
+    total_cost: float = 0.0
+    registration_fee: float = 0.0
+    referee_fee_total: float = 0.0
+
+class TournamentAddPlayers(BaseModel):
+    player_names: list[str]
+
+class CustomQuotaUpdate(BaseModel):
+    player_name: str
+    custom_quota: float
+
+class DropPlayerRequest(BaseModel):
+    player_name: str
+    reason: str = "lesion"
+
+class TournamentPaymentCreate(BaseModel):
+    player_name: str
+    amount: float
+    payment_method: str = "efectivo"
+    notes: str = None
+    date: str = None
+
+class TournamentMatchCreate(BaseModel):
+    opponent: str
+    team_score: int
+    opponent_score: int
+    match_type: str = "jornada"
+    notes: str = None
+    date: str = None
+
+class TournamentResultUpdate(BaseModel):
+    playoff_seed: int = None
+    final_result: str = None
+    status: str = None
+
+class BasketChatRequest(BaseModel):
+    message: str
+    chat_id: int = 1
+
 # Telegram Imports
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -79,8 +122,9 @@ from telegram.ext import (
 # OpenAI Import
 from openai import AsyncOpenAI
 
-# Database Integration
+# Database & Bot Integration
 import database
+from basket_bot import start_basket_bot, stop_basket_bot, run_basket_ai
 
 # Load environment variables
 load_dotenv()
@@ -814,6 +858,7 @@ async def handle_voice_message(update: Update, context: ContextTypes.DEFAULT_TYP
 # Global Telegram Application instance
 tg_app = None
 bot_task = None
+basket_task = None
 
 async def start_telegram_bot():
     """Asynchronously initializes and starts the Telegram Bot in the background."""
@@ -850,24 +895,27 @@ async def start_telegram_bot():
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Manages the startup and shutdown lifecycle of the co-hosted Telegram Bot."""
-    global tg_app, bot_task
+    """Manages the startup and shutdown lifecycle of the co-hosted Telegram Bots."""
+    global tg_app, bot_task, basket_task
     
-    # Spawn Telegram Bot startup as a background task to prevent blocking FastAPI/Uvicorn boot
+    # Spawn both Telegram Bots in the background to prevent blocking FastAPI/Uvicorn boot
     bot_task = asyncio.create_task(start_telegram_bot())
+    basket_task = asyncio.create_task(start_basket_bot())
     
     yield
     
-    # Shutdown bot gracefully
-    logger.info("Stopping Telegram Bot...")
+    # Shutdown bots gracefully
+    logger.info("Stopping Telegram Bots...")
     if tg_app:
         try:
             await tg_app.updater.stop()
             await tg_app.stop()
             await tg_app.shutdown()
-            logger.info("Telegram Bot shut down gracefully.")
+            logger.info("JARVIS Telegram Bot shut down gracefully.")
         except Exception as e:
             logger.error(f"Error during Telegram Bot shutdown: {e}")
+            
+    await stop_basket_bot()
 
 # Initialize FastAPI App
 app = FastAPI(
@@ -1262,6 +1310,212 @@ def delete_hobby(hobby_id: int):
     except Exception as e:
         logger.error(f"API Error deleting hobby: {e}")
         raise HTTPException(status_code=500, detail="Database error occurred.")
+
+
+# ==========================================
+# BASKETBALL REST API ENDPOINTS
+# ==========================================
+
+@app.get("/api/basket/tournaments", dependencies=[Depends(verify_api_token)])
+def get_basket_tournaments(only_active: bool = False):
+    """Retrieve all basketball tournaments with high-level summary metrics."""
+    try:
+        tourns = database.get_active_tournaments() if only_active else database.get_all_tournaments()
+        results = []
+        for t in tourns:
+            rep = database.get_tournament_financial_report(t.id)
+            if rep:
+                results.append(rep)
+        return results
+    except Exception as e:
+        logger.error(f"API Error fetching tournaments: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.get("/api/basket/tournaments/{tournament_id}", dependencies=[Depends(verify_api_token)])
+def get_basket_tournament_detail(tournament_id: int):
+    """Retrieve complete financial report, player rosters, debts and match records for a tournament."""
+    try:
+        report = database.get_tournament_financial_report(tournament_id)
+        if not report:
+            raise HTTPException(status_code=404, detail="Tournament not found.")
+        return report
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error fetching tournament detail: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.post("/api/basket/tournaments", status_code=status.HTTP_201_CREATED, dependencies=[Depends(verify_api_token)])
+def create_basket_tournament(data: TournamentCreate):
+    """Create a new basketball tournament."""
+    try:
+        tourn = database.add_tournament(
+            name=data.name,
+            team_name=data.team_name,
+            total_cost=data.total_cost,
+            registration_fee=data.registration_fee,
+            referee_fee_total=data.referee_fee_total
+        )
+        return database.get_tournament_financial_report(tourn.id)
+    except Exception as e:
+        logger.error(f"API Error creating tournament: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.post("/api/basket/tournaments/{tournament_id}/players", dependencies=[Depends(verify_api_token)])
+def add_players_to_basket_tournament(tournament_id: int, data: TournamentAddPlayers):
+    """Add a list of players to a tournament and recalculate quotas."""
+    try:
+        success, msg, tourn = database.add_players_to_tournament(tournament_id, data.player_names)
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return database.get_tournament_financial_report(tournament_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error adding players to tournament: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.put("/api/basket/tournaments/{tournament_id}/custom-quota", dependencies=[Depends(verify_api_token)])
+def set_custom_quota_endpoint(tournament_id: int, data: CustomQuotaUpdate):
+    """Assign a custom fixed quota to a player."""
+    try:
+        success, msg = database.set_player_custom_quota(tournament_id, data.player_name, data.custom_quota)
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return database.get_tournament_financial_report(tournament_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error setting custom quota: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.post("/api/basket/tournaments/{tournament_id}/drop-player", dependencies=[Depends(verify_api_token)])
+def drop_player_endpoint(tournament_id: int, data: DropPlayerRequest):
+    """Drop a player due to injury/leave, freezing their paid amount and recalculating active quotas."""
+    try:
+        success, msg, new_quota = database.drop_player_from_tournament(tournament_id, data.player_name, data.reason)
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return {
+            "status": "success",
+            "message": msg,
+            "new_quota_per_active_player": new_quota,
+            "tournament": database.get_tournament_financial_report(tournament_id)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error dropping player: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.post("/api/basket/tournaments/{tournament_id}/payments", status_code=status.HTTP_201_CREATED, dependencies=[Depends(verify_api_token)])
+def record_basket_payment(tournament_id: int, data: TournamentPaymentCreate):
+    """Record an installment or payment from a player."""
+    try:
+        success, msg, pdata = database.record_tournament_payment(
+            tournament_id_or_name=tournament_id,
+            player_name=data.player_name,
+            amount=data.amount,
+            payment_method=data.payment_method,
+            notes=data.notes,
+            date_str=data.date
+        )
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return pdata
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error recording payment: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.post("/api/basket/tournaments/{tournament_id}/matches", status_code=status.HTTP_201_CREATED, dependencies=[Depends(verify_api_token)])
+def record_basket_match(tournament_id: int, data: TournamentMatchCreate):
+    """Record a match result for a tournament."""
+    try:
+        success, msg, mdata = database.record_tournament_match(
+            tournament_id_or_name=tournament_id,
+            opponent=data.opponent,
+            team_score=data.team_score,
+            opponent_score=data.opponent_score,
+            match_type=data.match_type,
+            notes=data.notes,
+            date_str=data.date
+        )
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return mdata
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error recording match: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.put("/api/basket/tournaments/{tournament_id}/results", dependencies=[Depends(verify_api_token)])
+def update_tournament_result_endpoint(tournament_id: int, data: TournamentResultUpdate):
+    """Update tournament playoff seed, final result or status."""
+    try:
+        t = database.update_tournament_result(
+            tournament_id_or_name=tournament_id,
+            playoff_seed=data.playoff_seed,
+            final_result=data.final_result,
+            status=data.status
+        )
+        if not t:
+            raise HTTPException(status_code=404, detail="Tournament not found.")
+        return database.get_tournament_financial_report(tournament_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error updating tournament result: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.get("/api/basket/players", dependencies=[Depends(verify_api_token)])
+def get_basket_players():
+    """Retrieve catalog of all players."""
+    try:
+        players = database.get_all_players()
+        return [
+            {
+                "id": p.id,
+                "name": p.name,
+                "nickname": p.nickname,
+                "phone": p.phone,
+                "is_active": bool(p.is_active)
+            }
+            for p in players
+        ]
+    except Exception as e:
+        logger.error(f"API Error fetching players: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.get("/api/basket/players/{player_name}", dependencies=[Depends(verify_api_token)])
+def get_basket_player_detail(player_name: str):
+    """Retrieve individual player's summary, tournament history and outstanding debts."""
+    try:
+        summary = database.get_player_summary(player_name)
+        if not summary:
+            raise HTTPException(status_code=404, detail="Player not found.")
+        return summary
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error fetching player detail: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.post("/api/basket/chat", dependencies=[Depends(verify_api_token)])
+async def basket_chat_endpoint(request: BasketChatRequest):
+    """Chat endpoint to query Basketball Assistant via HTTP/Siri/Web."""
+    try:
+        reply = await run_basket_ai(request.chat_id, request.message)
+        return {
+            "status": "success",
+            "reply": reply,
+            "user_text": request.message
+        }
+    except Exception as e:
+        logger.error(f"API Error in /api/basket/chat: {e}")
+        raise HTTPException(status_code=500, detail="Internal server error processing basket chat.")
 
 
 # ==========================================

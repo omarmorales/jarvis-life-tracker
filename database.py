@@ -77,6 +77,90 @@ class Hobby(Base):
         return f"<Hobby(id={self.id}, name='{self.name}', category='{self.category}', icon='{self.icon}')>"
 
 
+# ==========================================
+# BASKETBALL MANAGEMENT MODELS
+# ==========================================
+
+class Player(Base):
+    __tablename__ = 'basket_players'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False, unique=True)
+    nickname = Column(String, nullable=True)
+    phone = Column(String, nullable=True)
+    is_active = Column(Integer, default=1)  # 1 active, 0 inactive
+    created_at = Column(DateTime, default=get_now_cdmx)
+
+    def __repr__(self):
+        return f"<Player(id={self.id}, name='{self.name}', nickname='{self.nickname}')>"
+
+
+class Tournament(Base):
+    __tablename__ = 'basket_tournaments'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, nullable=False, unique=True)
+    team_name = Column(String, default="Mi Equipo")
+    total_cost = Column(Float, nullable=False, default=0.0)
+    registration_fee = Column(Float, default=0.0)
+    referee_fee_total = Column(Float, default=0.0)
+    status = Column(String, default='active')  # 'active', 'completed', 'archived'
+    playoff_seed = Column(Integer, nullable=True)  # e.g., 1, 2, 3
+    final_result = Column(String, nullable=True)  # e.g., 'Campeón', 'Subcampeón', 'Semifinales', 'Fase Regular'
+    created_at = Column(DateTime, default=get_now_cdmx)
+
+    def __repr__(self):
+        return f"<Tournament(id={self.id}, name='{self.name}', team='{self.team_name}', cost={self.total_cost}, status='{self.status}')>"
+
+
+class TournamentPlayer(Base):
+    __tablename__ = 'basket_tournament_players'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tournament_id = Column(Integer, nullable=False)
+    player_id = Column(Integer, nullable=False)
+    assigned_quota = Column(Float, default=0.0)
+    has_custom_quota = Column(Integer, default=0)  # 1 if manually fixed, 0 if calculated
+    status = Column(String, default='active')  # 'active', 'injured', 'dropped_out'
+    notes = Column(String, nullable=True)
+    created_at = Column(DateTime, default=get_now_cdmx)
+
+    def __repr__(self):
+        return f"<TournamentPlayer(tourn_id={self.tournament_id}, player_id={self.player_id}, quota={self.assigned_quota}, status='{self.status}')>"
+
+
+class TournamentPayment(Base):
+    __tablename__ = 'basket_tournament_payments'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tournament_id = Column(Integer, nullable=False)
+    player_id = Column(Integer, nullable=False)
+    amount = Column(Float, nullable=False)
+    payment_method = Column(String, default='efectivo')  # 'transferencia', 'efectivo', 'otro'
+    notes = Column(String, nullable=True)
+    date = Column(DateTime, default=get_now_cdmx)
+
+    def __repr__(self):
+        return f"<TournamentPayment(id={self.id}, tourn_id={self.tournament_id}, player_id={self.player_id}, amount={self.amount}, date='{self.date.strftime('%Y-%m-%d')}')>"
+
+
+class TournamentMatch(Base):
+    __tablename__ = 'basket_tournament_matches'
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    tournament_id = Column(Integer, nullable=False)
+    opponent = Column(String, nullable=False)
+    team_score = Column(Integer, nullable=False)
+    opponent_score = Column(Integer, nullable=False)
+    is_win = Column(Integer, nullable=False)  # 1 win, 0 loss
+    match_type = Column(String, default='jornada')  # 'jornada', 'cuartos', 'semifinal', 'final', 'amistoso'
+    notes = Column(String, nullable=True)
+    date = Column(DateTime, default=get_now_cdmx)
+
+    def __repr__(self):
+        return f"<TournamentMatch(id={self.id}, vs='{self.opponent}', score={self.team_score}-{self.opponent_score}, win={self.is_win})>"
+
+
 # Create all tables in the engine (equivalent to "CREATE TABLE IF NOT EXISTS")
 Base.metadata.create_all(engine)
 
@@ -98,7 +182,7 @@ except Exception:
     pass  # Column already exists or dialect handles it differently
 
 # Create a configured "Session" class
-SessionLocal = sessionmaker(bind=engine)
+SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 def get_session():
     """Returns a new database session."""
@@ -382,6 +466,632 @@ def edit_hobby(hobby_id: int, name: str = None, category: str = None, descriptio
         return hobby
     finally:
         session.close()
+
+
+# ==========================================
+# BASKETBALL DATABASE HELPER METHODS
+# ==========================================
+
+def get_or_create_player(name: str, nickname: str = None, phone: str = None, session = None) -> Player:
+    """Gets an existing player by name (case-insensitive) or creates a new one."""
+    close_sess = False
+    if session is None:
+        session = get_session()
+        close_sess = True
+    try:
+        clean_name = name.strip()
+        player = session.query(Player).filter(Player.name.ilike(clean_name)).first()
+        if not player and nickname:
+            player = session.query(Player).filter(Player.nickname.ilike(nickname.strip())).first()
+            
+        if not player:
+            player = Player(
+                name=clean_name,
+                nickname=nickname.strip() if nickname else None,
+                phone=phone.strip() if phone else None,
+                is_active=1
+            )
+            session.add(player)
+            session.commit()
+            session.refresh(player)
+        else:
+            updated = False
+            if nickname and not player.nickname:
+                player.nickname = nickname.strip()
+                updated = True
+            if phone and not player.phone:
+                player.phone = phone.strip()
+                updated = True
+            if updated:
+                session.commit()
+                session.refresh(player)
+        return player
+    finally:
+        if close_sess:
+            session.close()
+
+def get_all_players():
+    """Retrieve all players from the catalog."""
+    session = get_session()
+    try:
+        return session.query(Player).order_by(Player.name.asc()).all()
+    finally:
+        session.close()
+
+def edit_player(player_id: int, name: str = None, nickname: str = None, phone: str = None):
+    """Edit a player's profile info."""
+    session = get_session()
+    try:
+        player = session.query(Player).filter(Player.id == player_id).first()
+        if not player:
+            return None
+        if name is not None:
+            player.name = name.strip()
+        if nickname is not None:
+            player.nickname = nickname.strip()
+        if phone is not None:
+            player.phone = phone.strip()
+        session.commit()
+        session.refresh(player)
+        return player
+    finally:
+        session.close()
+
+def add_tournament(name: str, team_name: str = "Mi Equipo", total_cost: float = 0.0, 
+                   registration_fee: float = 0.0, referee_fee_total: float = 0.0) -> Tournament:
+    """Creates a new basketball tournament or updates/returns existing one."""
+    session = get_session()
+    try:
+        clean_name = name.strip()
+        calculated_total = total_cost
+        if calculated_total == 0.0 and (registration_fee > 0 or referee_fee_total > 0):
+            calculated_total = registration_fee + referee_fee_total
+
+        existing = session.query(Tournament).filter(Tournament.name.ilike(clean_name)).first()
+        if existing:
+            if calculated_total > 0:
+                existing.total_cost = calculated_total
+            if registration_fee > 0:
+                existing.registration_fee = registration_fee
+            if referee_fee_total > 0:
+                existing.referee_fee_total = referee_fee_total
+            if team_name and team_name != "Mi Equipo":
+                existing.team_name = team_name.strip()
+            session.commit()
+            session.refresh(existing)
+            recalculate_tournament_quotas(existing.id, session=session)
+            return existing
+
+        tournament = Tournament(
+            name=clean_name,
+            team_name=team_name.strip() if team_name else "Mi Equipo",
+            total_cost=calculated_total,
+            registration_fee=registration_fee,
+            referee_fee_total=referee_fee_total,
+            status='active'
+        )
+        session.add(tournament)
+        session.commit()
+        session.refresh(tournament)
+        return tournament
+    finally:
+        session.close()
+
+def get_tournament(tournament_id_or_name, session = None) -> Tournament | None:
+    """Finds a tournament by ID or by fuzzy name match."""
+    close_sess = False
+    if session is None:
+        session = get_session()
+        close_sess = True
+    try:
+        if isinstance(tournament_id_or_name, int) or (isinstance(tournament_id_or_name, str) and tournament_id_or_name.isdigit()):
+            t_id = int(tournament_id_or_name)
+            return session.query(Tournament).filter(Tournament.id == t_id).first()
+            
+        name_str = str(tournament_id_or_name).strip()
+        t = session.query(Tournament).filter(Tournament.name.ilike(f"%{name_str}%")).order_by(Tournament.created_at.desc()).first()
+        return t
+    finally:
+        if close_sess:
+            session.close()
+
+def get_active_tournaments():
+    """Returns all active tournaments."""
+    session = get_session()
+    try:
+        return session.query(Tournament).filter(Tournament.status == 'active').order_by(Tournament.created_at.desc()).all()
+    finally:
+        session.close()
+
+def get_all_tournaments():
+    """Returns all tournaments."""
+    session = get_session()
+    try:
+        return session.query(Tournament).order_by(Tournament.created_at.desc()).all()
+    finally:
+        session.close()
+
+def recalculate_tournament_quotas(tournament_id: int, session = None):
+    """Core mathematical engine to dynamically calculate and balance tournament quotas."""
+    close_sess = False
+    if session is None:
+        session = get_session()
+        close_sess = True
+    try:
+        tourn = session.query(Tournament).filter(Tournament.id == tournament_id).first()
+        if not tourn:
+            return False
+
+        roster = session.query(TournamentPlayer).filter(TournamentPlayer.tournament_id == tournament_id).all()
+        if not roster:
+            return True
+
+        payments = session.query(TournamentPayment).filter(TournamentPayment.tournament_id == tournament_id).all()
+        player_paid = {}
+        for p in payments:
+            player_paid[p.player_id] = player_paid.get(p.player_id, 0.0) + p.amount
+
+        dropped_paid_total = 0.0
+        custom_quota_total = 0.0
+        active_regular = []
+
+        for tp in roster:
+            paid = player_paid.get(tp.player_id, 0.0)
+            if tp.status in ['injured', 'dropped_out']:
+                tp.assigned_quota = paid
+                dropped_paid_total += paid
+            elif tp.has_custom_quota == 1:
+                custom_quota_total += tp.assigned_quota
+            else:
+                active_regular.append(tp)
+
+        remaining_balance = tourn.total_cost - dropped_paid_total - custom_quota_total
+        if remaining_balance < 0:
+            remaining_balance = 0.0
+
+        if active_regular:
+            base_quota = round(remaining_balance / len(active_regular), 2)
+            for tp in active_regular:
+                tp.assigned_quota = base_quota
+
+        session.commit()
+        return True
+    finally:
+        if close_sess:
+            session.close()
+
+def add_players_to_tournament(tournament_id_or_name, player_names: list[str]) -> tuple[bool, str, Tournament | None]:
+    """Adds a list of player names to a tournament and recalculates quotas."""
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return False, "Torneo no encontrado.", None
+
+        added_count = 0
+        existing_count = 0
+        for name in player_names:
+            if not name or not name.strip():
+                continue
+            player = get_or_create_player(name.strip(), session=session)
+            
+            tp = session.query(TournamentPlayer).filter(
+                TournamentPlayer.tournament_id == tourn.id,
+                TournamentPlayer.player_id == player.id
+            ).first()
+            
+            if not tp:
+                new_tp = TournamentPlayer(
+                    tournament_id=tourn.id,
+                    player_id=player.id,
+                    status='active',
+                    has_custom_quota=0,
+                    assigned_quota=0.0
+                )
+                session.add(new_tp)
+                added_count += 1
+            else:
+                if tp.status != 'active':
+                    tp.status = 'active'
+                    added_count += 1
+                else:
+                    existing_count += 1
+                    
+        session.commit()
+        recalculate_tournament_quotas(tourn.id, session=session)
+        return True, f"Se agregaron {added_count} jugador(es) al torneo.", tourn
+    finally:
+        session.close()
+
+def set_player_custom_quota(tournament_id_or_name, player_name: str, custom_quota: float) -> tuple[bool, str]:
+    """Sets a specific fixed quota for a player and re-balances the rest of the team."""
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return False, "Torneo no encontrado."
+        player = get_or_create_player(player_name, session=session)
+        
+        tp = session.query(TournamentPlayer).filter(
+            TournamentPlayer.tournament_id == tourn.id,
+            TournamentPlayer.player_id == player.id
+        ).first()
+        
+        if not tp:
+            return False, f"El jugador {player.name} no está inscrito en el torneo {tourn.name}."
+            
+        tp.has_custom_quota = 1
+        tp.assigned_quota = custom_quota
+        session.commit()
+        recalculate_tournament_quotas(tourn.id, session=session)
+        return True, f"Cuota personalizada de ${custom_quota:.2f} asignada a {player.name}."
+    finally:
+        session.close()
+
+def drop_player_from_tournament(tournament_id_or_name, player_name: str, reason: str = "lesion") -> tuple[bool, str, float]:
+    """Marks a player as injured or dropped out, freezes their quota to their paid amount, and recalculates quotas."""
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return False, "Torneo no encontrado.", 0.0
+        player = get_or_create_player(player_name, session=session)
+        
+        tp = session.query(TournamentPlayer).filter(
+            TournamentPlayer.tournament_id == tourn.id,
+            TournamentPlayer.player_id == player.id
+        ).first()
+        
+        if not tp:
+            return False, f"El jugador {player.name} no está en este torneo.", 0.0
+            
+        tp.status = 'injured' if 'lesion' in reason.lower() else 'dropped_out'
+        tp.notes = reason
+        session.commit()
+        recalculate_tournament_quotas(tourn.id, session=session)
+        
+        # Get new quota for active players
+        active_tp = session.query(TournamentPlayer).filter(
+            TournamentPlayer.tournament_id == tourn.id,
+            TournamentPlayer.status == 'active',
+            TournamentPlayer.has_custom_quota == 0
+        ).first()
+        new_quota = active_tp.assigned_quota if active_tp else 0.0
+            
+        return True, f"Jugador {player.name} dado de baja ({tp.status}).", new_quota
+    finally:
+        session.close()
+
+def record_tournament_payment(tournament_id_or_name, player_name: str, amount: float, 
+                              payment_method: str = "efectivo", notes: str = None, date_str: str = None) -> tuple[bool, str, dict | None]:
+    """Records a payment from a player for a tournament."""
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return False, "Torneo no encontrado.", None
+        player = get_or_create_player(player_name, session=session)
+
+        tp = session.query(TournamentPlayer).filter(
+            TournamentPlayer.tournament_id == tourn.id,
+            TournamentPlayer.player_id == player.id
+        ).first()
+        
+        if not tp:
+            tp = TournamentPlayer(
+                tournament_id=tourn.id,
+                player_id=player.id,
+                status='active',
+                has_custom_quota=0,
+                assigned_quota=0.0
+            )
+            session.add(tp)
+            session.commit()
+            recalculate_tournament_quotas(tourn.id, session=session)
+
+        dt = get_now_cdmx()
+        if date_str:
+            try:
+                dt = datetime.strptime(date_str, '%Y-%m-%d')
+            except ValueError:
+                pass
+
+        payment = TournamentPayment(
+            tournament_id=tourn.id,
+            player_id=player.id,
+            amount=amount,
+            payment_method=payment_method,
+            notes=notes,
+            date=dt
+        )
+        session.add(payment)
+        session.commit()
+        session.refresh(payment)
+        
+        all_payments = session.query(TournamentPayment).filter(
+            TournamentPayment.tournament_id == tourn.id,
+            TournamentPayment.player_id == player.id
+        ).all()
+        total_paid = sum(p.amount for p in all_payments)
+        
+        tp = session.query(TournamentPlayer).filter(
+            TournamentPlayer.tournament_id == tourn.id,
+            TournamentPlayer.player_id == player.id
+        ).first()
+        
+        quota = tp.assigned_quota if tp else 0.0
+        remaining = max(0.0, quota - total_paid)
+        
+        result_data = {
+            "payment_id": payment.id,
+            "player_name": player.name,
+            "tournament_name": tourn.name,
+            "amount_paid": amount,
+            "total_paid": total_paid,
+            "quota": quota,
+            "remaining": remaining,
+            "is_paid_off": remaining <= 0.0
+        }
+        return True, "Pago registrado exitosamente.", result_data
+    finally:
+        session.close()
+
+def delete_tournament_payment(payment_id: int) -> bool:
+    """Deletes a tournament payment by ID."""
+    session = get_session()
+    try:
+        payment = session.query(TournamentPayment).filter(TournamentPayment.id == payment_id).first()
+        if not payment:
+            return False
+        tourn_id = payment.tournament_id
+        session.delete(payment)
+        session.commit()
+        recalculate_tournament_quotas(tourn_id, session=session)
+        return True
+    finally:
+        session.close()
+
+def record_tournament_match(tournament_id_or_name, opponent: str, team_score: int, opponent_score: int, 
+                            match_type: str = "jornada", notes: str = None, date_str: str = None) -> tuple[bool, str, dict | None]:
+    """Records a game/match result for a tournament."""
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return False, "Torneo no encontrado.", None
+
+        dt = get_now_cdmx()
+        if date_str:
+            try:
+                dt = datetime.strptime(date_str, '%Y-%m-%d')
+            except ValueError:
+                pass
+
+        is_win = 1 if team_score > opponent_score else 0
+        match = TournamentMatch(
+            tournament_id=tourn.id,
+            opponent=opponent.strip(),
+            team_score=team_score,
+            opponent_score=opponent_score,
+            is_win=is_win,
+            match_type=match_type,
+            notes=notes,
+            date=dt
+        )
+        session.add(match)
+        session.commit()
+        session.refresh(match)
+        
+        all_matches = session.query(TournamentMatch).filter(TournamentMatch.tournament_id == tourn.id).all()
+        wins = sum(1 for m in all_matches if m.is_win == 1)
+        losses = len(all_matches) - wins
+        
+        match_data = {
+            "match_id": match.id,
+            "tournament_name": tourn.name,
+            "opponent": match.opponent,
+            "score": f"{team_score} - {opponent_score}",
+            "is_win": bool(is_win),
+            "match_type": match_type,
+            "record": f"{wins}G - {losses}P"
+        }
+        return True, "Partido registrado exitosamente.", match_data
+    finally:
+        session.close()
+
+def update_tournament_result(tournament_id_or_name, playoff_seed: int = None, final_result: str = None, status: str = None):
+    """Updates tournament playoff seed, final championship result or status."""
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return None
+        t = session.query(Tournament).filter(Tournament.id == tourn.id).first()
+        if playoff_seed is not None:
+            t.playoff_seed = playoff_seed
+        if final_result is not None:
+            t.final_result = final_result
+        if status is not None:
+            t.status = status
+        session.commit()
+        session.refresh(t)
+        return t
+    finally:
+        session.close()
+
+def get_tournament_financial_report(tournament_id_or_name, session = None) -> dict | None:
+    """Returns a rich dictionary with complete financial metrics, player rosters, debts and match records."""
+    close_sess = False
+    if session is None:
+        session = get_session()
+        close_sess = True
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return None
+
+        roster = session.query(TournamentPlayer).filter(TournamentPlayer.tournament_id == tourn.id).all()
+        all_payments = session.query(TournamentPayment).filter(TournamentPayment.tournament_id == tourn.id).order_by(TournamentPayment.date.desc()).all()
+        all_matches = session.query(TournamentMatch).filter(TournamentMatch.tournament_id == tourn.id).order_by(TournamentMatch.date.asc()).all()
+        all_players = session.query(Player).all()
+        players_map = {p.id: p for p in all_players}
+
+        player_payments_map = {}
+        for p in all_payments:
+            if p.player_id not in player_payments_map:
+                player_payments_map[p.player_id] = []
+            player_payments_map[p.player_id].append({
+                "id": p.id,
+                "amount": p.amount,
+                "payment_method": p.payment_method,
+                "notes": p.notes,
+                "date": p.date.strftime("%Y-%m-%d %H:%M:%S")
+            })
+
+        active_players = []
+        inactive_players = []
+        total_collected = 0.0
+
+        for tp in roster:
+            p_obj = players_map.get(tp.player_id)
+            p_name = p_obj.name if p_obj else f"Jugador #{tp.player_id}"
+            p_nick = p_obj.nickname if p_obj else ""
+            
+            p_pay_list = player_payments_map.get(tp.player_id, [])
+            p_total_paid = sum(p["amount"] for p in p_pay_list)
+            total_collected += p_total_paid
+            
+            balance_due = max(0.0, tp.assigned_quota - p_total_paid)
+            is_paid = balance_due <= 0.0 and tp.assigned_quota > 0
+            
+            p_data = {
+                "player_id": tp.player_id,
+                "name": p_name,
+                "nickname": p_nick,
+                "status": tp.status,
+                "assigned_quota": tp.assigned_quota,
+                "has_custom_quota": bool(tp.has_custom_quota),
+                "total_paid": p_total_paid,
+                "balance_due": round(balance_due, 2),
+                "is_paid_off": is_paid,
+                "payments": p_pay_list
+            }
+            
+            if tp.status == 'active':
+                active_players.append(p_data)
+            else:
+                inactive_players.append(p_data)
+
+        active_players.sort(key=lambda x: (x["balance_due"] == 0, -x["balance_due"], x["name"]))
+
+        wins = sum(1 for m in all_matches if m.is_win == 1)
+        losses = len(all_matches) - wins
+        pending_total = max(0.0, tourn.total_cost - total_collected)
+        pct_collected = round((total_collected / tourn.total_cost * 100), 1) if tourn.total_cost > 0 else 100.0
+
+        return {
+            "tournament": {
+                "id": tourn.id,
+                "name": tourn.name,
+                "team_name": tourn.team_name,
+                "total_cost": tourn.total_cost,
+                "registration_fee": tourn.registration_fee,
+                "referee_fee_total": tourn.referee_fee_total,
+                "status": tourn.status,
+                "playoff_seed": tourn.playoff_seed,
+                "final_result": tourn.final_result,
+                "created_at": tourn.created_at.strftime("%Y-%m-%d %H:%M:%S")
+            },
+            "financials": {
+                "total_cost": tourn.total_cost,
+                "total_collected": total_collected,
+                "total_pending": pending_total,
+                "percentage_collected": pct_collected
+            },
+            "record": {
+                "wins": wins,
+                "losses": losses,
+                "total_matches": len(all_matches),
+                "formatted": f"{wins}G - {losses}P"
+            },
+            "active_players": active_players,
+            "inactive_players": inactive_players,
+            "matches": [
+                {
+                    "id": m.id,
+                    "opponent": m.opponent,
+                    "team_score": m.team_score,
+                    "opponent_score": m.opponent_score,
+                    "is_win": bool(m.is_win),
+                    "match_type": m.match_type,
+                    "notes": m.notes,
+                    "date": m.date.strftime("%Y-%m-%d")
+                }
+                for m in all_matches
+            ]
+        }
+    finally:
+        if close_sess:
+            session.close()
+
+def get_player_summary(player_name: str, session = None) -> dict | None:
+    """Returns a breakdown of all tournaments, quotas and payments for a single player."""
+    close_sess = False
+    if session is None:
+        session = get_session()
+        close_sess = True
+    try:
+        player = session.query(Player).filter(Player.name.ilike(player_name.strip())).first()
+        if not player:
+            return None
+
+        roster_entries = session.query(TournamentPlayer).filter(TournamentPlayer.player_id == player.id).all()
+        all_tournaments = {t.id: t for t in session.query(Tournament).all()}
+        all_payments = session.query(TournamentPayment).filter(TournamentPayment.player_id == player.id).all()
+        
+        tourn_payments_map = {}
+        for p in all_payments:
+            tourn_payments_map[p.tournament_id] = tourn_payments_map.get(p.tournament_id, 0.0) + p.amount
+
+        tournaments_data = []
+        total_paid_global = 0.0
+        total_debt_global = 0.0
+
+        for tp in roster_entries:
+            t = all_tournaments.get(tp.tournament_id)
+            if not t:
+                continue
+            paid = tourn_payments_map.get(tp.tournament_id, 0.0)
+            total_paid_global += paid
+            balance_due = max(0.0, tp.assigned_quota - paid)
+            total_debt_global += balance_due
+
+            tournaments_data.append({
+                "tournament_id": t.id,
+                "tournament_name": t.name,
+                "team_name": t.team_name,
+                "tournament_status": t.status,
+                "player_status": tp.status,
+                "quota": tp.assigned_quota,
+                "paid": paid,
+                "balance_due": round(balance_due, 2),
+                "is_paid_off": balance_due <= 0.0
+            })
+
+        return {
+            "player": {
+                "id": player.id,
+                "name": player.name,
+                "nickname": player.nickname,
+                "phone": player.phone
+            },
+            "total_paid_global": total_paid_global,
+            "total_debt_global": total_debt_global,
+            "tournaments": tournaments_data
+        }
+    finally:
+        if close_sess:
+            session.close()
 
 
 if __name__ == '__main__':
