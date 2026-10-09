@@ -563,7 +563,7 @@ async def basket_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_html(
         rf"🏀 ¡Hola {user.mention_html()}! Soy tu **Basket Tracker Bot**." + "\n\n"
         "Te ayudaré a administrar las finanzas y el récord de tus equipos de basketball:\n\n"
-        "🏆 **Torneos:** *'Crea el torneo Ledom de $12,000 para Toros'*\n"
+        "🏆 **Torneos:** *'Crea el torneo Ledom de $12,000 para Monarque'*\n"
         "👥 **Jugadores:** *'Agrega a Juan, Carlos, Memo y Pedro al torneo Ledom'*\n"
         "💰 **Pagos:** *'Juan pagó $1,200 por transferencia'* o *'Memo dio $500 en efectivo'*\n"
         "📊 **Estado:** *'¿Cómo van los pagos del torneo?'* o *'¿Cuánto debe Carlos?'*\n"
