@@ -95,6 +95,7 @@ class TournamentPaymentCreate(BaseModel):
     payment_method: str = "efectivo"
     notes: str = None
     date: str = None
+    force_create_player: bool = False
 
 class TournamentMatchCreate(BaseModel):
     opponent: str
@@ -1429,7 +1430,8 @@ def record_basket_payment(tournament_id: int, data: TournamentPaymentCreate):
             amount=data.amount,
             payment_method=data.payment_method,
             notes=data.notes,
-            date_str=data.date
+            date_str=data.date,
+            force_create_player=getattr(data, 'force_create_player', False)
         )
         if not success:
             raise HTTPException(status_code=400, detail=msg)

@@ -487,6 +487,125 @@ def edit_hobby(hobby_id: int, name: str = None, category: str = None, descriptio
 # BASKETBALL DATABASE HELPER METHODS
 # ==========================================
 
+import unicodedata
+
+def normalize_text(text: str) -> str:
+    """Removes accents, lowercases and strips whitespace."""
+    if not text:
+        return ""
+    return "".join(
+        c for c in unicodedata.normalize('NFD', str(text))
+        if unicodedata.category(c) != 'Mn'
+    ).lower().strip()
+
+
+def find_matching_players(name_query: str, tournament_id: int = None, session = None) -> list[Player]:
+    """Finds players by exact, token, or partial name match, prioritizing tournament roster."""
+    close_sess = False
+    if session is None:
+        session = get_session()
+        close_sess = True
+    try:
+        q_norm = normalize_text(name_query)
+        if not q_norm:
+            return []
+
+        tournament_players = []
+        if tournament_id:
+            tournament_players = (
+                session.query(Player)
+                .join(TournamentPlayer, TournamentPlayer.player_id == Player.id)
+                .filter(TournamentPlayer.tournament_id == tournament_id)
+                .all()
+            )
+
+        all_players = session.query(Player).all()
+
+        def match_score(p: Player, is_in_tourn: bool) -> int | None:
+            p_name_norm = normalize_text(p.name)
+            p_nick_norm = normalize_text(p.nickname) if p.nickname else ""
+            
+            if q_norm == p_name_norm or (p_nick_norm and q_norm == p_nick_norm):
+                return 1 if is_in_tourn else 2
+                
+            p_tokens = set(p_name_norm.split())
+            if p_nick_norm:
+                p_tokens.update(p_nick_norm.split())
+            q_tokens = set(q_norm.split())
+            
+            if q_tokens.issubset(p_tokens) or q_tokens == p_tokens:
+                return 3 if is_in_tourn else 4
+                
+            if q_tokens.intersection(p_tokens):
+                return 5 if is_in_tourn else 6
+                
+            if q_norm in p_name_norm or p_name_norm in q_norm or (p_nick_norm and q_norm in p_nick_norm):
+                return 7 if is_in_tourn else 8
+                
+            return None
+
+        tourn_player_ids = {p.id for p in tournament_players}
+        scored = []
+        
+        for p in tournament_players:
+            score = match_score(p, is_in_tourn=True)
+            if score is not None:
+                scored.append((score, p))
+                
+        # If we have matches from players enrolled in this tournament, use ONLY those tournament players!
+        # Only if no enrolled tournament player matched, check the outside catalog players:
+        if not scored:
+            for p in all_players:
+                if p.id in tourn_player_ids:
+                    continue
+                score = match_score(p, is_in_tourn=False)
+                if score is not None:
+                    scored.append((score, p))
+
+        scored.sort(key=lambda x: x[0])
+        
+        seen = set()
+        results = []
+        for _, p in scored:
+            if p.id not in seen:
+                seen.add(p.id)
+                results.append(p)
+        return results
+    finally:
+        if close_sess:
+            session.close()
+
+
+def resolve_player_for_tournament(name_query: str, tournament_id: int = None, session = None) -> tuple[str, Player | None, list[Player]]:
+    """Resolves a player query into:
+    - ('EXACT', player, [player]): Exact match.
+    - ('SIMILAR_ONE', candidate, [candidate]): Found exactly 1 similar player.
+    - ('AMBIGUOUS', None, [p1, p2, ...]): Found 2 or more similar candidates.
+    - ('NOT_FOUND', None, []): No matching candidate found.
+    """
+    close_sess = False
+    if session is None:
+        session = get_session()
+        close_sess = True
+    try:
+        q_norm = normalize_text(name_query)
+        candidates = find_matching_players(name_query, tournament_id=tournament_id, session=session)
+        if not candidates:
+            return "NOT_FOUND", None, []
+
+        for p in candidates:
+            if normalize_text(p.name) == q_norm or (p.nickname and normalize_text(p.nickname) == q_norm):
+                return "EXACT", p, [p]
+
+        if len(candidates) == 1:
+            return "SIMILAR_ONE", candidates[0], candidates
+
+        return "AMBIGUOUS", None, candidates
+    finally:
+        if close_sess:
+            session.close()
+
+
 def get_or_create_player(name: str, nickname: str = None, phone: str = None, session = None) -> Player:
     """Gets an existing player by name (case-insensitive) or creates a new one."""
     close_sess = False
@@ -828,7 +947,15 @@ def add_players_to_tournament(tournament_id_or_name, player_names: list) -> tupl
             clean_name, jersey_num = parse_player_name_and_number(entry)
             if not clean_name:
                 continue
-            player = get_or_create_player(clean_name, session=session)
+            
+            # Check if a matching player exists in catalog before blindly inserting
+            existing_players = find_matching_players(clean_name, session=session)
+            player = None
+            if existing_players and (normalize_text(existing_players[0].name) == normalize_text(clean_name) or normalize_text(clean_name) in normalize_text(existing_players[0].name)):
+                player = existing_players[0]
+            else:
+                player = get_or_create_player(clean_name, session=session)
+
             if jersey_num is not None and player.jersey_number is None:
                 player.jersey_number = jersey_num
             
@@ -868,18 +995,26 @@ def set_player_jersey_number(player_name: str, jersey_number: int, tournament_id
     """Assigns or updates a player's jersey number globally and/or in a tournament."""
     session = get_session()
     try:
-        player = get_or_create_player(player_name, session=session)
-        player.jersey_number = jersey_number
+        tourn = get_tournament(tournament_id_or_name, session=session) if tournament_id_or_name else None
+        tourn_id = tourn.id if tourn else None
         
-        if tournament_id_or_name:
-            tourn = get_tournament(tournament_id_or_name, session=session)
-            if tourn:
-                tp = session.query(TournamentPlayer).filter(
-                    TournamentPlayer.tournament_id == tourn.id,
-                    TournamentPlayer.player_id == player.id
-                ).first()
-                if tp:
-                    tp.jersey_number = jersey_number
+        status, player, candidates = resolve_player_for_tournament(player_name, tournament_id=tourn_id, session=session)
+        if status in ("EXACT", "SIMILAR_ONE") and candidates:
+            player = candidates[0]
+        elif status == "AMBIGUOUS":
+            names_str = ", ".join([f"'{c.name}'" for c in candidates])
+            return False, f"⚠️ Hay varios jugadores con nombre similar: {names_str}. Por favor especifica el nombre completo."
+        else:
+            return False, f"⚠️ No se encontró al jugador '{player_name}'."
+
+        player.jersey_number = jersey_number
+        if tourn:
+            tp = session.query(TournamentPlayer).filter(
+                TournamentPlayer.tournament_id == tourn.id,
+                TournamentPlayer.player_id == player.id
+            ).first()
+            if tp:
+                tp.jersey_number = jersey_number
         session.commit()
         return True, f"Número #{jersey_number} asignado a {player.name} exitosamente."
     except Exception as e:
@@ -895,7 +1030,15 @@ def set_player_custom_quota(tournament_id_or_name, player_name: str, custom_quot
         tourn = get_tournament(tournament_id_or_name, session=session)
         if not tourn:
             return False, "Torneo no encontrado."
-        player = get_or_create_player(player_name, session=session)
+            
+        status, player, candidates = resolve_player_for_tournament(player_name, tournament_id=tourn.id, session=session)
+        if status in ("EXACT", "SIMILAR_ONE") and candidates:
+            player = candidates[0]
+        elif status == "AMBIGUOUS":
+            names_str = ", ".join([f"'{c.name}'" for c in candidates])
+            return False, f"⚠️ Hay varios jugadores con nombre similar en {tourn.name}: {names_str}. Por favor especifica el nombre completo."
+        else:
+            return False, f"⚠️ No se encontró al jugador '{player_name}' en el torneo {tourn.name}."
         
         tp = session.query(TournamentPlayer).filter(
             TournamentPlayer.tournament_id == tourn.id,
@@ -920,7 +1063,15 @@ def drop_player_from_tournament(tournament_id_or_name, player_name: str, reason:
         tourn = get_tournament(tournament_id_or_name, session=session)
         if not tourn:
             return False, "Torneo no encontrado.", 0.0
-        player = get_or_create_player(player_name, session=session)
+            
+        status, player, candidates = resolve_player_for_tournament(player_name, tournament_id=tourn.id, session=session)
+        if status in ("EXACT", "SIMILAR_ONE") and candidates:
+            player = candidates[0]
+        elif status == "AMBIGUOUS":
+            names_str = ", ".join([f"'{c.name}'" for c in candidates])
+            return False, f"⚠️ Hay varios jugadores similares en {tourn.name}: {names_str}. Por favor indica el nombre completo.", 0.0
+        else:
+            return False, f"⚠️ No se encontró al jugador '{player_name}' en este torneo.", 0.0
         
         tp = session.query(TournamentPlayer).filter(
             TournamentPlayer.tournament_id == tourn.id,
@@ -935,7 +1086,6 @@ def drop_player_from_tournament(tournament_id_or_name, player_name: str, reason:
         session.commit()
         recalculate_tournament_quotas(tourn.id, session=session)
         
-        # Get new quota for active players
         active_tp = session.query(TournamentPlayer).filter(
             TournamentPlayer.tournament_id == tourn.id,
             TournamentPlayer.status == 'active',
@@ -948,14 +1098,46 @@ def drop_player_from_tournament(tournament_id_or_name, player_name: str, reason:
         session.close()
 
 def record_tournament_payment(tournament_id_or_name, player_name: str, amount: float, 
-                              payment_method: str = "efectivo", notes: str = None, date_str: str = None) -> tuple[bool, str, dict | None]:
-    """Records a payment from a player for a tournament."""
+                              payment_method: str = "efectivo", notes: str = None, 
+                              date_str: str = None, force_create_player: bool = False,
+                              confirmed_player_id: int = None) -> tuple[bool, str, dict | None]:
+    """Records a payment from a player for a tournament, ensuring disambiguation and similarity confirmation."""
     session = get_session()
     try:
         tourn = get_tournament(tournament_id_or_name, session=session)
         if not tourn:
             return False, "Torneo no encontrado.", None
-        player = get_or_create_player(player_name, session=session)
+
+        player = None
+        if confirmed_player_id:
+            player = session.query(Player).filter(Player.id == confirmed_player_id).first()
+        
+        if not player:
+            status, matched_player, candidates = resolve_player_for_tournament(player_name, tournament_id=tourn.id, session=session)
+            
+            if status == "EXACT":
+                player = matched_player
+            elif status == "SIMILAR_ONE" and not force_create_player:
+                sug = candidates[0]
+                jersey_str = f" (#{sug.jersey_number})" if sug.jersey_number else ""
+                return False, (
+                    f"⚠️ No encontré a '{player_name}' con nombre exacto, pero encontré a '{sug.name}'{jersey_str} en el torneo '{tourn.name}'. "
+                    f"¿Te refieres a él para registrar el pago de ${amount:.2f} MXN?\n"
+                    f"Confírmamelo diciendo 'Sí, a {sug.name}', o indícame si deseas inscribirlo como un jugador nuevo."
+                ), {"status": "SIMILAR_ONE", "suggested_player": sug.name, "suggested_id": sug.id}
+            elif status == "AMBIGUOUS" and not force_create_player:
+                names_str = ", ".join([f"'{c.name}'" + (f" (#{c.jersey_number})" if c.jersey_number else "") for c in candidates])
+                return False, (
+                    f"⚠️ Encontré varios jugadores con nombre similar en el torneo '{tourn.name}': {names_str}.\n"
+                    f"¿A cuál de ellos corresponde el pago de ${amount:.2f} MXN?"
+                ), {"status": "AMBIGUOUS", "candidates": [c.name for c in candidates]}
+            elif status == "NOT_FOUND" and not force_create_player:
+                return False, (
+                    f"⚠️ No encontré a ningún jugador llamado o similar a '{player_name}' en el torneo '{tourn.name}'.\n"
+                    f"¿Deseas inscribir a '{player_name}' como un jugador nuevo en este torneo?"
+                ), {"status": "NOT_FOUND"}
+            else:
+                player = get_or_create_player(player_name, session=session)
 
         tp = session.query(TournamentPlayer).filter(
             TournamentPlayer.tournament_id == tourn.id,
@@ -1298,7 +1480,11 @@ def get_player_summary(player_name: str, session = None) -> dict | None:
     try:
         player = session.query(Player).filter(Player.name.ilike(player_name.strip())).first()
         if not player:
-            return None
+            candidates = find_matching_players(player_name, session=session)
+            if candidates:
+                player = candidates[0]
+            else:
+                return None
 
         roster_entries = session.query(TournamentPlayer).filter(TournamentPlayer.player_id == player.id).all()
         all_tournaments = {t.id: t for t in session.query(Tournament).all()}

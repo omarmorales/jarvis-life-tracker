@@ -279,6 +279,10 @@ basket_tools = [
                     "fecha": {
                         "type": "string",
                         "description": "Fecha opcional en formato YYYY-MM-DD si es un pago pasado."
+                    },
+                    "crear_nuevo_jugador": {
+                        "type": "boolean",
+                        "description": "True solo si el usuario confirmó explícitamente que desea crear/inscribir a esta persona como un jugador nuevo a pesar de no existir o diferir de una sugerencia."
                     }
                 },
                 "required": ["torneo", "jugador", "monto"]
@@ -459,7 +463,8 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
             "7. Cuando consulten el estado de un torneo, presenta un resumen visual y ordenado con: Total Meta, Recaudado, Faltante, y el desglose de cada jugador (incluyendo su número de jersey si lo tiene, quién ya pagó al 100% y quién debe aún), más el récord de partidos si existen.\n"
             "8. Si un jugador se lesiona o sale, usa dar_de_baja_jugador y explica claramente al usuario cómo se congeló su saldo pagado y cómo se redistribuyó la diferencia entre los demás.\n"
             "9. Puedes asignar o actualizar números de camiseta/jersey ('Ponle el #23 a Omar' o al inscribir 'Agrega a Omar #23').\n"
-            "10. Si el usuario pide eliminar un torneo, antes de eliminar pide confirmación explícita o llama a eliminar_torneo con confirmar=true si el usuario ya lo confirmó claramente."
+            "10. Si el usuario pide eliminar un torneo, antes de eliminar pide confirmación explícita o llama a eliminar_torneo con confirmar=true si el usuario ya lo confirmó claramente.\n"
+            "11. REGLA ESTRICTA DE JUGADORES Y PAGOS: NUNCA crees un jugador nuevo automáticamente sin preguntar. Si el usuario escribe un nombre no exacto o abreviado (ej. 'Saul' en vez de 'Saúl Morales', o 'Chuy' cuando hay varios Chuys), registrar_pago buscará nombres similares y devolverá una advertencia o sugerencia. Pregúntale SIEMPRE al usuario para confirmar si se refiere a ese jugador sugerido antes de aplicar el pago. Solo si el usuario confirma explícitamente que es un jugador nuevo y separado debes activar crear_nuevo_jugador=true."
         )
     }
 
@@ -556,14 +561,15 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
                         player_name=args["jugador"],
                         amount=args["monto"],
                         payment_method=args.get("metodo_pago", "efectivo"),
-                        notes=args.get("notes"),
-                        date_str=args.get("fecha")
+                        notes=args.get("notas") or args.get("notes"),
+                        date_str=args.get("fecha"),
+                        force_create_player=args.get("crear_nuevo_jugador", False)
                     )
                     if success and pdata:
                         status_str = "¡Totalmente pagado!" if pdata["is_paid_off"] else f"Resta pagar: ${pdata['remaining']:.2f}"
                         tool_content = f"Pago registrado: {pdata['player_name']} abonó ${pdata['amount_paid']:.2f} para '{pdata['tournament_name']}'. Total acumulado: ${pdata['total_paid']:.2f} de ${pdata['quota']:.2f}. {status_str}"
                     else:
-                        tool_content = f"Error: {msg}"
+                        tool_content = msg
 
                 elif fname == "registrar_partido":
                     success, msg, mdata = database.record_tournament_match(
