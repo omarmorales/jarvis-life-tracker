@@ -97,7 +97,7 @@ basket_tools = [
         "type": "function",
         "function": {
             "name": "agregar_jugadores",
-            "description": "Agrega uno o varios jugadores al roster de un torneo y recalcula la cuota equitativa automáticamente.",
+            "description": "Agrega uno o varios jugadores al roster de un torneo (admite nombres o nombres con número, ej. ['Carlos #7', 'Omar #23', 'Memo']) y recalcula la cuota equitativa automáticamente.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -108,10 +108,56 @@ basket_tools = [
                     "jugadores": {
                         "type": "array",
                         "items": {"type": "string"},
-                        "description": "Lista de nombres de los jugadores a inscribir (ej. ['Carlos', 'Juan', 'Memo'])."
+                        "description": "Lista de nombres o nombres con número de los jugadores a inscribir (ej. ['Carlos #7', 'Juan #10', 'Memo'])."
                     }
                 },
                 "required": ["torneo", "jugadores"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "asignar_numero_jugador",
+            "description": "Asigna o cambia el número de camiseta/jersey de un jugador (ej. 'Omar lleva el número 23').",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "jugador": {
+                        "type": "string",
+                        "description": "Nombre del jugador."
+                    },
+                    "numero": {
+                        "type": "integer",
+                        "description": "Número de camiseta/jersey del jugador (ej. 23, 7, 0)."
+                    },
+                    "torneo": {
+                        "type": "string",
+                        "description": "Opcional: Nombre o ID del torneo si el número es específico para ese torneo."
+                    }
+                },
+                "required": ["jugador", "numero"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "eliminar_torneo",
+            "description": "Elimina permanentemente un torneo y todos sus datos asociados (partidos, récord, pagos y cuotas).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "torneo": {
+                        "type": "string",
+                        "description": "Nombre o ID del torneo a eliminar."
+                    },
+                    "confirmar": {
+                        "type": "boolean",
+                        "description": "Debe ser true para proceder con la eliminación definitiva."
+                    }
+                },
+                "required": ["torneo", "confirmar"]
             }
         }
     },
@@ -372,8 +418,10 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
             "3. Cuando te pidan crear un torneo, si no mencionan el costo, pregunta amablemente el costo total estimado o de inscripción/arbitraje.\n"
             "4. Si el usuario te da una lista de nombres (ej. 'Agrega a Juan, Carlos, Memo y Pedro al torneo Ledom'), llama a la herramienta agregar_jugadores.\n"
             "5. Si te mencionan varios pagos en una misma frase (ej. 'Juan pagó $500 y Memo $600'), puedes llamar a registrar_pago para cada uno.\n"
-            "6. Cuando consulten el estado de un torneo, presenta un resumen visual y ordenado con: Total Meta, Recaudado, Faltante, y el desglose de cada jugador (quién ya pagó al 100% y quién debe aún), más el récord de partidos si existen.\n"
-            "7. Si un jugador se lesiona o sale, usa dar_de_baja_jugador y explica claramente al usuario cómo se congeló su saldo pagado y cómo se redistribuyó la diferencia entre los demás."
+            "6. Cuando consulten el estado de un torneo, presenta un resumen visual y ordenado con: Total Meta, Recaudado, Faltante, y el desglose de cada jugador (incluyendo su número de jersey si lo tiene, quién ya pagó al 100% y quién debe aún), más el récord de partidos si existen.\n"
+            "7. Si un jugador se lesiona o sale, usa dar_de_baja_jugador y explica claramente al usuario cómo se congeló su saldo pagado y cómo se redistribuyó la diferencia entre los demás.\n"
+            "8. Puedes asignar o actualizar números de camiseta/jersey ('Ponle el #23 a Omar' o al inscribir 'Agrega a Omar #23').\n"
+            "9. Si el usuario pide eliminar un torneo, antes de eliminar pide confirmación explícita o llama a eliminar_torneo con confirmar=true si el usuario ya lo confirmó claramente."
         )
     }
 
@@ -510,6 +558,24 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
                         tool_content = f"No se encontró al jugador '{args['jugador']}' o no tiene torneos registrados."
                     else:
                         tool_content = json.dumps(psummary, ensure_ascii=False)
+
+                elif fname == "asignar_numero_jugador":
+                    success, msg = database.set_player_jersey_number(
+                        player_name=args["jugador"],
+                        jersey_number=args["numero"],
+                        tournament_id_or_name=args.get("torneo")
+                    )
+                    tool_content = msg if success else f"Error: {msg}"
+
+                elif fname == "eliminar_torneo":
+                    if not args.get("confirmar", False):
+                        tool_content = "Acción cancelada. Para eliminar el torneo se requiere confirmación explícita."
+                    else:
+                        success, msg, summary = database.delete_tournament(args["torneo"])
+                        if success:
+                            tool_content = msg
+                        else:
+                            tool_content = f"Error: {msg}"
 
                 elif fname == "listar_torneos":
                     only_act = args.get("solo_activos", True)

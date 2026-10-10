@@ -88,11 +88,12 @@ class Player(Base):
     name = Column(String, nullable=False, unique=True)
     nickname = Column(String, nullable=True)
     phone = Column(String, nullable=True)
+    jersey_number = Column(Integer, nullable=True)
     is_active = Column(Integer, default=1)  # 1 active, 0 inactive
     created_at = Column(DateTime, default=get_now_cdmx)
 
     def __repr__(self):
-        return f"<Player(id={self.id}, name='{self.name}', nickname='{self.nickname}')>"
+        return f"<Player(id={self.id}, name='{self.name}', nickname='{self.nickname}', jersey={self.jersey_number})>"
 
 
 class Tournament(Base):
@@ -119,6 +120,7 @@ class TournamentPlayer(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     tournament_id = Column(Integer, nullable=False)
     player_id = Column(Integer, nullable=False)
+    jersey_number = Column(Integer, nullable=True)
     assigned_quota = Column(Float, default=0.0)
     has_custom_quota = Column(Integer, default=0)  # 1 if manually fixed, 0 if calculated
     status = Column(String, default='active')  # 'active', 'injured', 'dropped_out'
@@ -126,7 +128,7 @@ class TournamentPlayer(Base):
     created_at = Column(DateTime, default=get_now_cdmx)
 
     def __repr__(self):
-        return f"<TournamentPlayer(tourn_id={self.tournament_id}, player_id={self.player_id}, quota={self.assigned_quota}, status='{self.status}')>"
+        return f"<TournamentPlayer(tourn_id={self.tournament_id}, player_id={self.player_id}, jersey={self.jersey_number}, quota={self.assigned_quota}, status='{self.status}')>"
 
 
 class TournamentPayment(Base):
@@ -180,6 +182,19 @@ try:
         conn.execute(text("ALTER TABLE workout_logs ADD COLUMN metrics JSON"))
 except Exception:
     pass  # Column already exists or dialect handles it differently
+
+# Update basket tables for jersey numbers (runs in isolated transaction)
+try:
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE basket_players ADD COLUMN jersey_number INTEGER"))
+except Exception:
+    pass
+
+try:
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE basket_tournament_players ADD COLUMN jersey_number INTEGER"))
+except Exception:
+    pass
 
 # Create a configured "Session" class
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
@@ -518,7 +533,7 @@ def get_all_players():
     finally:
         session.close()
 
-def edit_player(player_id: int, name: str = None, nickname: str = None, phone: str = None):
+def edit_player(player_id: int, name: str = None, nickname: str = None, phone: str = None, jersey_number: int = None):
     """Edit a player's profile info."""
     session = get_session()
     try:
@@ -531,6 +546,8 @@ def edit_player(player_id: int, name: str = None, nickname: str = None, phone: s
             player.nickname = nickname.strip()
         if phone is not None:
             player.phone = phone.strip()
+        if jersey_number is not None:
+            player.jersey_number = jersey_number
         session.commit()
         session.refresh(player)
         return player
@@ -660,8 +677,32 @@ def recalculate_tournament_quotas(tournament_id: int, session = None):
         if close_sess:
             session.close()
 
-def add_players_to_tournament(tournament_id_or_name, player_names: list[str]) -> tuple[bool, str, Tournament | None]:
-    """Adds a list of player names to a tournament and recalculates quotas."""
+def parse_player_name_and_number(raw_entry) -> tuple[str, int | None]:
+    """Extracts player name and jersey number from string like 'Omar #23' or dict."""
+    import re
+    if isinstance(raw_entry, dict):
+        name = str(raw_entry.get("name") or raw_entry.get("nombre") or "").strip()
+        num = raw_entry.get("jersey_number") or raw_entry.get("numero")
+        try:
+            num = int(num) if num is not None else None
+        except (ValueError, TypeError):
+            num = None
+        return name, num
+
+    text = str(raw_entry).strip()
+    match = re.search(r'^(.*?)\s*(?:[#\-]|(?:\())\s*(\d+)(?:\))?$', text)
+    if match:
+        name = match.group(1).strip()
+        try:
+            num = int(match.group(2))
+            return name, num
+        except ValueError:
+            pass
+    return text, None
+
+
+def add_players_to_tournament(tournament_id_or_name, player_names: list) -> tuple[bool, str, Tournament | None]:
+    """Adds a list of player names (or names with numbers) to a tournament and recalculates quotas."""
     session = get_session()
     try:
         tourn = get_tournament(tournament_id_or_name, session=session)
@@ -670,10 +711,13 @@ def add_players_to_tournament(tournament_id_or_name, player_names: list[str]) ->
 
         added_count = 0
         existing_count = 0
-        for name in player_names:
-            if not name or not name.strip():
+        for entry in player_names:
+            clean_name, jersey_num = parse_player_name_and_number(entry)
+            if not clean_name:
                 continue
-            player = get_or_create_player(name.strip(), session=session)
+            player = get_or_create_player(clean_name, session=session)
+            if jersey_num is not None and player.jersey_number is None:
+                player.jersey_number = jersey_num
             
             tp = session.query(TournamentPlayer).filter(
                 TournamentPlayer.tournament_id == tourn.id,
@@ -684,6 +728,7 @@ def add_players_to_tournament(tournament_id_or_name, player_names: list[str]) ->
                 new_tp = TournamentPlayer(
                     tournament_id=tourn.id,
                     player_id=player.id,
+                    jersey_number=jersey_num if jersey_num is not None else player.jersey_number,
                     status='active',
                     has_custom_quota=0,
                     assigned_quota=0.0
@@ -691,6 +736,8 @@ def add_players_to_tournament(tournament_id_or_name, player_names: list[str]) ->
                 session.add(new_tp)
                 added_count += 1
             else:
+                if jersey_num is not None:
+                    tp.jersey_number = jersey_num
                 if tp.status != 'active':
                     tp.status = 'active'
                     added_count += 1
@@ -700,6 +747,31 @@ def add_players_to_tournament(tournament_id_or_name, player_names: list[str]) ->
         session.commit()
         recalculate_tournament_quotas(tourn.id, session=session)
         return True, f"Se agregaron {added_count} jugador(es) al torneo.", tourn
+    finally:
+        session.close()
+
+
+def set_player_jersey_number(player_name: str, jersey_number: int, tournament_id_or_name = None) -> tuple[bool, str]:
+    """Assigns or updates a player's jersey number globally and/or in a tournament."""
+    session = get_session()
+    try:
+        player = get_or_create_player(player_name, session=session)
+        player.jersey_number = jersey_number
+        
+        if tournament_id_or_name:
+            tourn = get_tournament(tournament_id_or_name, session=session)
+            if tourn:
+                tp = session.query(TournamentPlayer).filter(
+                    TournamentPlayer.tournament_id == tourn.id,
+                    TournamentPlayer.player_id == player.id
+                ).first()
+                if tp:
+                    tp.jersey_number = jersey_number
+        session.commit()
+        return True, f"Número #{jersey_number} asignado a {player.name} exitosamente."
+    except Exception as e:
+        session.rollback()
+        return False, f"Error al asignar número: {str(e)}"
     finally:
         session.close()
 
@@ -919,6 +991,74 @@ def update_tournament_result(tournament_id_or_name, playoff_seed: int = None, fi
     finally:
         session.close()
 
+
+def delete_tournament(tournament_id_or_name, delete_orphan_players: bool = False) -> tuple[bool, str, dict | None]:
+    """Permanently deletes a tournament and all its related records in cascade.
+    
+    Deletes:
+    - TournamentMatch (all matches and record)
+    - TournamentPayment (all payments recorded for this tournament)
+    - TournamentPlayer (all roster allocations and quota assignments)
+    - Tournament (the tournament record itself)
+    - If delete_orphan_players is True, deletes Player records that have no other tournaments.
+    """
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return False, "Torneo no encontrado.", None
+
+        tourn_id = tourn.id
+        tourn_name = tourn.name
+
+        # 1. Matches
+        matches_deleted = session.query(TournamentMatch).filter(TournamentMatch.tournament_id == tourn_id).delete(synchronize_session=False)
+
+        # 2. Payments
+        payments_deleted = session.query(TournamentPayment).filter(TournamentPayment.tournament_id == tourn_id).delete(synchronize_session=False)
+
+        # Find players in this tournament before deleting roster
+        tp_player_ids = [tp.player_id for tp in session.query(TournamentPlayer).filter(TournamentPlayer.tournament_id == tourn_id).all()]
+
+        # 3. Roster / Quotas
+        roster_deleted = session.query(TournamentPlayer).filter(TournamentPlayer.tournament_id == tourn_id).delete(synchronize_session=False)
+
+        # 4. Tournament
+        session.delete(tourn)
+
+        # 5. Optional orphan player cleanup
+        orphans_deleted = 0
+        if delete_orphan_players and tp_player_ids:
+            for p_id in tp_player_ids:
+                other_tp = session.query(TournamentPlayer).filter(TournamentPlayer.player_id == p_id).first()
+                if not other_tp:
+                    p = session.query(Player).filter(Player.id == p_id).first()
+                    if p:
+                        session.delete(p)
+                        orphans_deleted += 1
+
+        session.commit()
+        
+        summary = {
+            "tournament_id": tourn_id,
+            "tournament_name": tourn_name,
+            "deleted_matches": matches_deleted,
+            "deleted_payments": payments_deleted,
+            "deleted_roster_entries": roster_deleted,
+            "deleted_orphan_players": orphans_deleted
+        }
+        msg = (
+            f"Torneo '{tourn_name}' eliminado exitosamente con todos sus datos asociados: "
+            f"{matches_deleted} partido(s), {payments_deleted} pago(s) y {roster_deleted} registro(s) de jugadores."
+        )
+        return True, msg, summary
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Error deleting tournament: {e}")
+        return False, f"Error al eliminar torneo: {str(e)}", None
+    finally:
+        session.close()
+
 def get_tournament_financial_report(tournament_id_or_name, session = None) -> dict | None:
     """Returns a rich dictionary with complete financial metrics, player rosters, debts and match records."""
     close_sess = False
@@ -963,11 +1103,13 @@ def get_tournament_financial_report(tournament_id_or_name, session = None) -> di
             
             balance_due = max(0.0, tp.assigned_quota - p_total_paid)
             is_paid = balance_due <= 0.0 and tp.assigned_quota > 0
+            jersey_num = tp.jersey_number if tp.jersey_number is not None else (p_obj.jersey_number if p_obj else None)
             
             p_data = {
                 "player_id": tp.player_id,
                 "name": p_name,
                 "nickname": p_nick,
+                "jersey_number": jersey_num,
                 "status": tp.status,
                 "assigned_quota": tp.assigned_quota,
                 "has_custom_quota": bool(tp.has_custom_quota),
@@ -1072,6 +1214,7 @@ def get_player_summary(player_name: str, session = None) -> dict | None:
                 "team_name": t.team_name,
                 "tournament_status": t.status,
                 "player_status": tp.status,
+                "jersey_number": tp.jersey_number if tp.jersey_number is not None else player.jersey_number,
                 "quota": tp.assigned_quota,
                 "paid": paid,
                 "balance_due": round(balance_due, 2),
@@ -1083,6 +1226,7 @@ def get_player_summary(player_name: str, session = None) -> dict | None:
                 "id": player.id,
                 "name": player.name,
                 "nickname": player.nickname,
+                "jersey_number": player.jersey_number,
                 "phone": player.phone
             },
             "total_paid_global": total_paid_global,

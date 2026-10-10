@@ -84,6 +84,11 @@ class DropPlayerRequest(BaseModel):
     player_name: str
     reason: str = "lesion"
 
+class PlayerJerseyUpdate(BaseModel):
+    player_name: str
+    jersey_number: int
+    tournament_id: int = None
+
 class TournamentPaymentCreate(BaseModel):
     player_name: str
     amount: float
@@ -1470,6 +1475,20 @@ def update_tournament_result_endpoint(tournament_id: int, data: TournamentResult
         logger.error(f"API Error updating tournament result: {e}")
         raise HTTPException(status_code=500, detail="Database error occurred.")
 
+@app.delete("/api/basket/tournaments/{tournament_id}", dependencies=[Depends(verify_api_token)])
+def delete_basket_tournament_endpoint(tournament_id: int, delete_orphan_players: bool = False):
+    """Permanently delete a tournament and its matches, payments, and rosters in cascade."""
+    try:
+        success, msg, summary = database.delete_tournament(tournament_id, delete_orphan_players=delete_orphan_players)
+        if not success:
+            raise HTTPException(status_code=404, detail=msg)
+        return {"status": "success", "message": msg, "summary": summary}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error deleting tournament: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
 @app.get("/api/basket/players", dependencies=[Depends(verify_api_token)])
 def get_basket_players():
     """Retrieve catalog of all players."""
@@ -1480,6 +1499,7 @@ def get_basket_players():
                 "id": p.id,
                 "name": p.name,
                 "nickname": p.nickname,
+                "jersey_number": p.jersey_number,
                 "phone": p.phone,
                 "is_active": bool(p.is_active)
             }
@@ -1487,6 +1507,20 @@ def get_basket_players():
         ]
     except Exception as e:
         logger.error(f"API Error fetching players: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.put("/api/basket/players/jersey", dependencies=[Depends(verify_api_token)])
+def set_player_jersey_endpoint(data: PlayerJerseyUpdate):
+    """Assign or update a player's jersey number."""
+    try:
+        success, msg = database.set_player_jersey_number(data.player_name, data.jersey_number, data.tournament_id)
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return {"status": "success", "message": msg}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error updating jersey number: {e}")
         raise HTTPException(status_code=500, detail="Database error occurred.")
 
 @app.get("/api/basket/players/{player_name}", dependencies=[Depends(verify_api_token)])
