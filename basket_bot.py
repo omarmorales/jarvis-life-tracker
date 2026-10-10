@@ -87,9 +87,46 @@ basket_tools = [
                     "arbitrajes_total": {
                         "type": "number",
                         "description": "Costo total acumulado de arbitrajes si se desglosa."
+                    },
+                    "forzar_creacion": {
+                        "type": "boolean",
+                        "description": "True solo si el usuario confirmó explícitamente que desea crear un torneo nuevo a pesar de que exista uno parecido."
                     }
                 },
                 "required": ["nombre"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "actualizar_costo_torneo",
+            "description": "Actualiza o modifica el costo total, costo de inscripción, arbitrajes o equipo de un torneo existente (recalcula automáticamente las cuotas de los jugadores).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "torneo": {
+                        "type": "string",
+                        "description": "Nombre o ID del torneo existente que se desea modificar (ej. 'Ledom', 'Ledom 2026')."
+                    },
+                    "costo_total": {
+                        "type": "number",
+                        "description": "Nuevo costo total global del torneo."
+                    },
+                    "inscripcion": {
+                        "type": "number",
+                        "description": "Nuevo costo de inscripción si se desglosa."
+                    },
+                    "arbitrajes_total": {
+                        "type": "number",
+                        "description": "Nuevo costo total de arbitrajes si se desglosa."
+                    },
+                    "equipo": {
+                        "type": "string",
+                        "description": "Nuevo nombre del equipo si se desea cambiar."
+                    }
+                },
+                "required": ["torneo"]
             }
         }
     },
@@ -415,13 +452,14 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
             "REGLAS CLAVE:\n"
             "1. Responde SIEMPRE en español con tono amable, claro, entusiasta y deportivo (usa emojis como 🏀, 🏆, 💰, ✅, ⏳, ❌, 🏥).\n"
             "2. Formatea las cifras de dinero claramente con signo de pesos (ej. $1,200.00 MXN).\n"
-            "3. Cuando te pidan crear un torneo, si no mencionan el costo, pregunta amablemente el costo total estimado o de inscripción/arbitraje.\n"
-            "4. Si el usuario te da una lista de nombres (ej. 'Agrega a Juan, Carlos, Memo y Pedro al torneo Ledom'), llama a la herramienta agregar_jugadores.\n"
-            "5. Si te mencionan varios pagos en una misma frase (ej. 'Juan pagó $500 y Memo $600'), puedes llamar a registrar_pago para cada uno.\n"
-            "6. Cuando consulten el estado de un torneo, presenta un resumen visual y ordenado con: Total Meta, Recaudado, Faltante, y el desglose de cada jugador (incluyendo su número de jersey si lo tiene, quién ya pagó al 100% y quién debe aún), más el récord de partidos si existen.\n"
-            "7. Si un jugador se lesiona o sale, usa dar_de_baja_jugador y explica claramente al usuario cómo se congeló su saldo pagado y cómo se redistribuyó la diferencia entre los demás.\n"
-            "8. Puedes asignar o actualizar números de camiseta/jersey ('Ponle el #23 a Omar' o al inscribir 'Agrega a Omar #23').\n"
-            "9. Si el usuario pide eliminar un torneo, antes de eliminar pide confirmación explícita o llama a eliminar_torneo con confirmar=true si el usuario ya lo confirmó claramente."
+            "3. MODIFICAR COSTOS VS CREAR: Si el usuario menciona una cantidad o cambio de costo para un torneo (ej. 'el costo de ledom es 8000', 'el total de ledom es 12000', 'cambia el costo a 9000'), NUNCA llames a crear_torneo. Llama SIEMPRE a actualizar_costo_torneo.\n"
+            "4. CREACIÓN SEGURA: Cuando te pidan crear un torneo, si no mencionan el costo, pregúntalo. Si el nombre se parece a uno ya existente, advierte al usuario antes de duplicar.\n"
+            "5. Si el usuario te da una lista de nombres (ej. 'Agrega a Juan #23 y Carlos #7'), llama a agregar_jugadores.\n"
+            "6. Si te mencionan varios pagos en una misma frase (ej. 'Juan pagó $500 y Memo $600'), puedes llamar a registrar_pago para cada uno.\n"
+            "7. Cuando consulten el estado de un torneo, presenta un resumen visual y ordenado con: Total Meta, Recaudado, Faltante, y el desglose de cada jugador (incluyendo su número de jersey si lo tiene, quién ya pagó al 100% y quién debe aún), más el récord de partidos si existen.\n"
+            "8. Si un jugador se lesiona o sale, usa dar_de_baja_jugador y explica claramente al usuario cómo se congeló su saldo pagado y cómo se redistribuyó la diferencia entre los demás.\n"
+            "9. Puedes asignar o actualizar números de camiseta/jersey ('Ponle el #23 a Omar' o al inscribir 'Agrega a Omar #23').\n"
+            "10. Si el usuario pide eliminar un torneo, antes de eliminar pide confirmación explícita o llama a eliminar_torneo con confirmar=true si el usuario ya lo confirmó claramente."
         )
     }
 
@@ -460,14 +498,37 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
 
             try:
                 if fname == "crear_torneo":
-                    t = database.add_tournament(
-                        name=args["nombre"],
-                        team_name=args.get("equipo", "Mi Equipo"),
-                        total_cost=args.get("costo_total", 0.0),
-                        registration_fee=args.get("inscripcion", 0.0),
-                        referee_fee_total=args.get("arbitrajes_total", 0.0)
+                    nombre = args["nombre"]
+                    forzar = args.get("forzar_creacion", False)
+                    similar = database.find_similar_tournaments(nombre)
+                    if similar and not forzar:
+                        sim_names = ", ".join([f"'{s.name}' (ID: {s.id}, Costo: ${s.total_cost:.2f})" for s in similar])
+                        tool_content = (
+                            f"⚠️ ATENCIÓN: Ya existe un torneo activo con nombre similar: {sim_names}.\n"
+                            f"NO se creó un torneo nuevo para evitar duplicados accidentales.\n"
+                            f"Informa al usuario que ya existe ese torneo y pregúntale si deseaba actualizar el costo de '{similar[0].name}' "
+                            f"o si realmente desea crear uno nuevo y separado con el nombre '{nombre}'."
+                        )
+                    else:
+                        t = database.add_tournament(
+                            name=nombre,
+                            team_name=args.get("equipo", "Mi Equipo"),
+                            total_cost=args.get("costo_total", 0.0),
+                            registration_fee=args.get("inscripcion", 0.0),
+                            referee_fee_total=args.get("arbitrajes_total", 0.0),
+                            force_create=forzar
+                        )
+                        tool_content = f"🆕 Torneo '{t.name}' creado exitosamente: ID={t.id}, Equipo='{t.team_name}', CostoTotal=${t.total_cost:.2f} MXN."
+
+                elif fname == "actualizar_costo_torneo":
+                    success, msg, t = database.update_tournament_cost(
+                        tournament_id_or_name=args["torneo"],
+                        total_cost=args.get("costo_total"),
+                        registration_fee=args.get("inscripcion"),
+                        referee_fee_total=args.get("arbitrajes_total"),
+                        team_name=args.get("equipo")
                     )
-                    tool_content = f"Torneo creado exitosamente: ID={t.id}, Nombre='{t.name}', Equipo='{t.team_name}', CostoTotal={t.total_cost:.2f}"
+                    tool_content = msg if success else f"Error: {msg}"
 
                 elif fname == "agregar_jugadores":
                     success, msg, t = database.add_players_to_tournament(args["torneo"], args["jugadores"])

@@ -554,9 +554,56 @@ def edit_player(player_id: int, name: str = None, nickname: str = None, phone: s
     finally:
         session.close()
 
+def find_similar_tournaments(name_query: str, session = None) -> list[Tournament]:
+    """Finds tournaments that have similar names, keywords, or bidirectional substring matches."""
+    import re
+    close_sess = False
+    if session is None:
+        session = get_session()
+        close_sess = True
+    try:
+        query_str = str(name_query).strip().lower()
+        if not query_str:
+            return []
+        
+        all_tournaments = session.query(Tournament).all()
+        matches = []
+        
+        stopwords = {"torneo", "liga", "copa", "de", "del", "el", "la", "los", "las", "basket", "basketball"}
+        query_words = [w for w in re.findall(r'\b\w+\b', query_str) if w not in stopwords]
+        
+        for t in all_tournaments:
+            t_name_lower = t.name.lower()
+            # 1. Exact match
+            if t_name_lower == query_str:
+                matches.append(t)
+                continue
+            # 2. Bidirectional substring match
+            if query_str in t_name_lower or t_name_lower in query_str:
+                matches.append(t)
+                continue
+            # 3. Meaningful keyword overlap
+            t_words = [w for w in re.findall(r'\b\w+\b', t_name_lower) if w not in stopwords]
+            common_words = set(query_words).intersection(set(t_words))
+            if common_words:
+                matches.append(t)
+                
+        seen = set()
+        unique_matches = []
+        for m in matches:
+            if m.id not in seen:
+                seen.add(m.id)
+                unique_matches.append(m)
+        return unique_matches
+    finally:
+        if close_sess:
+            session.close()
+
+
 def add_tournament(name: str, team_name: str = "Mi Equipo", total_cost: float = 0.0, 
-                   registration_fee: float = 0.0, referee_fee_total: float = 0.0) -> Tournament:
-    """Creates a new basketball tournament or updates/returns existing one."""
+                   registration_fee: float = 0.0, referee_fee_total: float = 0.0,
+                   force_create: bool = False) -> Tournament:
+    """Creates a new basketball tournament or updates existing if a matching/similar one exists."""
     session = get_session()
     try:
         clean_name = name.strip()
@@ -564,7 +611,15 @@ def add_tournament(name: str, team_name: str = "Mi Equipo", total_cost: float = 
         if calculated_total == 0.0 and (registration_fee > 0 or referee_fee_total > 0):
             calculated_total = registration_fee + referee_fee_total
 
+        # 1. Check exact match
         existing = session.query(Tournament).filter(Tournament.name.ilike(clean_name)).first()
+        
+        # 2. If not found and not forcing creation, check similar existing tournament
+        if not existing and not force_create:
+            similar = find_similar_tournaments(clean_name, session=session)
+            if similar:
+                existing = similar[0]
+
         if existing:
             if calculated_total > 0:
                 existing.total_cost = calculated_total
@@ -594,20 +649,78 @@ def add_tournament(name: str, team_name: str = "Mi Equipo", total_cost: float = 
     finally:
         session.close()
 
+
+def update_tournament_cost(tournament_id_or_name, total_cost: float = None, 
+                           registration_fee: float = None, referee_fee_total: float = None, 
+                           team_name: str = None) -> tuple[bool, str, Tournament | None]:
+    """Updates tournament total costs, fees, or team name and automatically recalculates active player quotas."""
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return False, f"No se encontró ningún torneo que coincida con '{tournament_id_or_name}'.", None
+
+        changes = []
+        if total_cost is not None and total_cost > 0:
+            tourn.total_cost = total_cost
+            changes.append(f"Costo Total=${total_cost:.2f}")
+        if registration_fee is not None and registration_fee >= 0:
+            tourn.registration_fee = registration_fee
+            changes.append(f"Inscripción=${registration_fee:.2f}")
+        if referee_fee_total is not None and referee_fee_total >= 0:
+            tourn.referee_fee_total = referee_fee_total
+            changes.append(f"Arbitrajes=${referee_fee_total:.2f}")
+        if team_name and team_name.strip():
+            tourn.team_name = team_name.strip()
+            changes.append(f"Equipo='{tourn.team_name}'")
+
+        if not changes:
+            return False, "No se proporcionaron nuevos montos ni datos para actualizar.", tourn
+
+        session.commit()
+        session.refresh(tourn)
+        recalculate_tournament_quotas(tourn.id, session=session)
+        
+        rep = get_tournament_financial_report(tourn.id, session=session)
+        new_quota = rep["active_players"][0]["assigned_quota"] if rep and rep["active_players"] else 0.0
+        msg = (
+            f"✅ Costos del torneo '{tourn.name}' actualizados ({', '.join(changes)}). "
+            f"Nueva cuota por jugador activo: ${new_quota:.2f} MXN."
+        )
+        return True, msg, tourn
+    except Exception as e:
+        session.rollback()
+        logger.error(f"Error updating tournament cost: {e}")
+        return False, f"Error al actualizar costo: {str(e)}", None
+    finally:
+        session.close()
+
+
 def get_tournament(tournament_id_or_name, session = None) -> Tournament | None:
-    """Finds a tournament by ID or by fuzzy name match."""
+    """Finds a tournament by ID, exact name, forward substring, or fuzzy similarity."""
     close_sess = False
     if session is None:
         session = get_session()
         close_sess = True
     try:
-        if isinstance(tournament_id_or_name, int) or (isinstance(tournament_id_or_name, str) and tournament_id_or_name.isdigit()):
+        if isinstance(tournament_id_or_name, int) or (isinstance(tournament_id_or_name, str) and str(tournament_id_or_name).strip().isdigit()):
             t_id = int(tournament_id_or_name)
             return session.query(Tournament).filter(Tournament.id == t_id).first()
             
         name_str = str(tournament_id_or_name).strip()
+        # 1. Exact match
+        t = session.query(Tournament).filter(Tournament.name.ilike(name_str)).first()
+        if t:
+            return t
+        # 2. Forward substring
         t = session.query(Tournament).filter(Tournament.name.ilike(f"%{name_str}%")).order_by(Tournament.created_at.desc()).first()
-        return t
+        if t:
+            return t
+        # 3. Bidirectional substring or keyword similarity
+        similar = find_similar_tournaments(name_str, session=session)
+        if similar:
+            return similar[0]
+        return None
     finally:
         if close_sess:
             session.close()

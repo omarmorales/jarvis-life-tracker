@@ -109,6 +109,12 @@ class TournamentResultUpdate(BaseModel):
     final_result: str = None
     status: str = None
 
+class TournamentCostUpdate(BaseModel):
+    total_cost: float = None
+    registration_fee: float = None
+    referee_fee_total: float = None
+    team_name: str = None
+
 class BasketChatRequest(BaseModel):
     message: str
     chat_id: int = 1
@@ -1473,6 +1479,26 @@ def update_tournament_result_endpoint(tournament_id: int, data: TournamentResult
         raise
     except Exception as e:
         logger.error(f"API Error updating tournament result: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.put("/api/basket/tournaments/{tournament_id}/cost", dependencies=[Depends(verify_api_token)])
+def update_tournament_cost_endpoint(tournament_id: int, data: TournamentCostUpdate):
+    """Update tournament costs (total, registration, referees) and recalculate quotas."""
+    try:
+        success, msg, t = database.update_tournament_cost(
+            tournament_id_or_name=tournament_id,
+            total_cost=data.total_cost,
+            registration_fee=data.registration_fee,
+            referee_fee_total=data.referee_fee_total,
+            team_name=data.team_name
+        )
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return database.get_tournament_financial_report(t.id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error updating tournament cost: {e}")
         raise HTTPException(status_code=500, detail="Database error occurred.")
 
 @app.delete("/api/basket/tournaments/{tournament_id}", dependencies=[Depends(verify_api_token)])
