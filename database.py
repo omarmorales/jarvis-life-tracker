@@ -499,15 +499,36 @@ def normalize_text(text: str) -> str:
     ).lower().strip()
 
 
+def get_effective_player_jersey(player: Player, tournament_id: int = None, session = None) -> int | None:
+    """Returns effective jersey number for a player, checking TournamentPlayer first, then Player."""
+    if tournament_id and session:
+        tp = session.query(TournamentPlayer).filter(
+            TournamentPlayer.tournament_id == tournament_id,
+            TournamentPlayer.player_id == player.id
+        ).first()
+        if tp and tp.jersey_number is not None:
+            return tp.jersey_number
+    return player.jersey_number
+
+
 def find_matching_players(name_query: str, tournament_id: int = None, session = None) -> list[Player]:
-    """Finds players by exact, token, or partial name match, prioritizing tournament roster."""
+    """Finds players by exact, token, or partial name match, prioritizing tournament roster and handling jersey numbers."""
+    import re
     close_sess = False
     if session is None:
         session = get_session()
         close_sess = True
     try:
-        q_norm = normalize_text(name_query)
-        if not q_norm:
+        # Extract jersey number if specified like '#15', 'jersey 15', 'numero 15', or pure digits
+        jersey_match = re.search(r'(?:#|jersey|numero|número|no\.?|num\.?)\s*(\d+)', name_query, re.IGNORECASE)
+        extracted_jersey = int(jersey_match.group(1)) if jersey_match else None
+        if extracted_jersey is None and name_query.strip().isdigit():
+            extracted_jersey = int(name_query.strip())
+
+        cleaned_query = re.sub(r'(?:#|jersey|numero|número|no\.?|num\.?)\s*\d+', '', name_query, flags=re.IGNORECASE).strip()
+        q_norm = normalize_text(cleaned_query)
+
+        if not q_norm and extracted_jersey is None:
             return []
 
         tournament_players = []
@@ -524,46 +545,81 @@ def find_matching_players(name_query: str, tournament_id: int = None, session = 
         def match_score(p: Player, is_in_tourn: bool) -> int | None:
             p_name_norm = normalize_text(p.name)
             p_nick_norm = normalize_text(p.nickname) if p.nickname else ""
-            
-            if q_norm == p_name_norm or (p_nick_norm and q_norm == p_nick_norm):
-                return 1 if is_in_tourn else 2
-                
             p_tokens = set(p_name_norm.split())
             if p_nick_norm:
                 p_tokens.update(p_nick_norm.split())
+            eff_jersey = get_effective_player_jersey(p, tournament_id, session)
+
+            # Query is just jersey number (e.g. '#15')
+            if not q_norm and extracted_jersey is not None:
+                if eff_jersey == extracted_jersey:
+                    return 1 if is_in_tourn else 2
+                return None
+
+            # Exact name or nickname match
+            if q_norm == p_name_norm or (p_nick_norm and q_norm == p_nick_norm):
+                if extracted_jersey is not None:
+                    if eff_jersey == extracted_jersey:
+                        return 1 if is_in_tourn else 2
+                    return None  # conflicting jersey specified
+                return 1 if is_in_tourn else 2
+
             q_tokens = set(q_norm.split())
-            
-            if q_tokens.issubset(p_tokens) or q_tokens == p_tokens:
+
+            # Tokens exactly equal
+            if q_tokens == p_tokens:
+                if extracted_jersey is not None:
+                    if eff_jersey == extracted_jersey:
+                        return 1 if is_in_tourn else 2
+                    return None
                 return 3 if is_in_tourn else 4
-                
-            if q_tokens.intersection(p_tokens):
+
+            # One is subset of the other (e.g. 'Saul' matches 'Saul Morales')
+            if q_tokens.issubset(p_tokens) or p_tokens.issubset(q_tokens):
+                if extracted_jersey is not None:
+                    if eff_jersey == extracted_jersey:
+                        return 2 if is_in_tourn else 3
+                    return None
                 return 5 if is_in_tourn else 6
-                
+
+            # If jersey matches and tokens intersect
+            if extracted_jersey is not None and eff_jersey == extracted_jersey and q_tokens.intersection(p_tokens):
+                return 3 if is_in_tourn else 4
+
+            # Partial token intersection (e.g. shares only last name like 'Morales')
+            if q_tokens.intersection(p_tokens):
+                return 15 if is_in_tourn else 16
+
             if q_norm in p_name_norm or p_name_norm in q_norm or (p_nick_norm and q_norm in p_nick_norm):
-                return 7 if is_in_tourn else 8
-                
+                return 20 if is_in_tourn else 21
+
             return None
 
         tourn_player_ids = {p.id for p in tournament_players}
         scored = []
-        
+
         for p in tournament_players:
-            score = match_score(p, is_in_tourn=True)
-            if score is not None:
-                scored.append((score, p))
-                
-        # If we have matches from players enrolled in this tournament, use ONLY those tournament players!
-        # Only if no enrolled tournament player matched, check the outside catalog players:
+            sc = match_score(p, is_in_tourn=True)
+            if sc is not None:
+                scored.append((sc, p))
+
+        # If no tournament player matched, search general catalog
         if not scored:
             for p in all_players:
                 if p.id in tourn_player_ids:
                     continue
-                score = match_score(p, is_in_tourn=False)
-                if score is not None:
-                    scored.append((score, p))
+                sc = match_score(p, is_in_tourn=False)
+                if sc is not None:
+                    scored.append((sc, p))
 
         scored.sort(key=lambda x: x[0])
-        
+
+        # If we have strong matches (score <= 6: exact, equal tokens, or subsets), discard weak partial overlaps (score >= 15)
+        if scored:
+            best_score = scored[0][0]
+            if best_score <= 6:
+                scored = [item for item in scored if item[0] <= 6]
+
         seen = set()
         results = []
         for _, p in scored:
@@ -583,19 +639,45 @@ def resolve_player_for_tournament(name_query: str, tournament_id: int = None, se
     - ('AMBIGUOUS', None, [p1, p2, ...]): Found 2 or more similar candidates.
     - ('NOT_FOUND', None, []): No matching candidate found.
     """
+    import re
     close_sess = False
     if session is None:
         session = get_session()
         close_sess = True
     try:
-        q_norm = normalize_text(name_query)
+        jersey_match = re.search(r'(?:#|jersey|numero|número|no\.?|num\.?)\s*(\d+)', name_query, re.IGNORECASE)
+        extracted_jersey = int(jersey_match.group(1)) if jersey_match else None
+        if extracted_jersey is None and name_query.strip().isdigit():
+            extracted_jersey = int(name_query.strip())
+
+        cleaned_query = re.sub(r'(?:#|jersey|numero|número|no\.?|num\.?)\s*\d+', '', name_query, flags=re.IGNORECASE).strip()
+        q_norm = normalize_text(cleaned_query)
+
         candidates = find_matching_players(name_query, tournament_id=tournament_id, session=session)
         if not candidates:
             return "NOT_FOUND", None, []
 
+        # If query was solely jersey number
+        if not q_norm and extracted_jersey is not None:
+            if len(candidates) == 1:
+                return "EXACT", candidates[0], candidates
+            return "AMBIGUOUS", None, candidates
+
+        # Check exact match on cleaned name or nickname
         for p in candidates:
-            if normalize_text(p.name) == q_norm or (p.nickname and normalize_text(p.nickname) == q_norm):
+            eff_jersey = get_effective_player_jersey(p, tournament_id, session)
+            p_name_norm = normalize_text(p.name)
+            p_nick_norm = normalize_text(p.nickname) if p.nickname else ""
+            if p_name_norm == q_norm or (p_nick_norm and p_nick_norm == q_norm):
+                if extracted_jersey is not None and eff_jersey is not None and eff_jersey != extracted_jersey:
+                    continue
                 return "EXACT", p, [p]
+
+        # Check if extracted jersey uniquely confirms one candidate
+        if extracted_jersey is not None:
+            j_matches = [p for p in candidates if get_effective_player_jersey(p, tournament_id, session) == extracted_jersey]
+            if len(j_matches) == 1:
+                return "EXACT", j_matches[0], [j_matches[0]]
 
         if len(candidates) == 1:
             return "SIMILAR_ONE", candidates[0], candidates
