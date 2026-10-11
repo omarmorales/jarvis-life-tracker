@@ -1218,6 +1218,196 @@ def delete_tournament_payment(payment_id: int) -> bool:
     finally:
         session.close()
 
+def adjust_player_total_paid(tournament_id_or_name, player_name: str, new_total_paid: float, 
+                             notes: str = None, force_create_player: bool = False,
+                             confirmed_player_id: int = None) -> tuple[bool, str, dict | None]:
+    """Adjusts/overrides the total amount paid by a player in a tournament, allowing seamless correction of mistakes."""
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return False, "Torneo no encontrado.", None
+
+        player = None
+        if confirmed_player_id:
+            player = session.query(Player).filter(Player.id == confirmed_player_id).first()
+
+        if not player:
+            status, matched_player, candidates = resolve_player_for_tournament(player_name, tournament_id=tourn.id, session=session)
+            if status == "EXACT":
+                player = matched_player
+            elif status == "SIMILAR_ONE" and not force_create_player:
+                sug = candidates[0]
+                jersey_str = f" (#{sug.jersey_number})" if sug.jersey_number else ""
+                return False, (
+                    f"⚠️ No encontré a '{player_name}' con nombre exacto, pero encontré a '{sug.name}'{jersey_str} en el torneo '{tourn.name}'. "
+                    f"¿Te refieres a él para ajustar su total pagado a ${new_total_paid:.2f} MXN?\n"
+                    f"Confírmamelo diciendo 'Sí, a {sug.name}'."
+                ), {"status": "SIMILAR_ONE", "suggested_player": sug.name, "suggested_id": sug.id}
+            elif status == "AMBIGUOUS" and not force_create_player:
+                names_str = ", ".join([f"'{c.name}'" + (f" (#{c.jersey_number})" if c.jersey_number else "") for c in candidates])
+                return False, (
+                    f"⚠️ Encontré varios jugadores con nombre similar en el torneo '{tourn.name}': {names_str}.\n"
+                    f"¿A cuál de ellos deseas modificarle el total pagado a ${new_total_paid:.2f} MXN?"
+                ), {"status": "AMBIGUOUS", "candidates": [c.name for c in candidates]}
+            elif status == "NOT_FOUND" and not force_create_player:
+                return False, (
+                    f"⚠️ No encontré a ningún jugador llamado o similar a '{player_name}' en el torneo '{tourn.name}'."
+                ), {"status": "NOT_FOUND"}
+            else:
+                player = get_or_create_player(player_name, session=session)
+
+        tp = session.query(TournamentPlayer).filter(
+            TournamentPlayer.tournament_id == tourn.id,
+            TournamentPlayer.player_id == player.id
+        ).first()
+
+        if not tp:
+            return False, f"El jugador '{player.name}' no está inscrito en el torneo '{tourn.name}'.", None
+
+        if new_total_paid < 0:
+            return False, "El total pagado no puede ser un número negativo.", None
+
+        existing_payments = session.query(TournamentPayment).filter(
+            TournamentPayment.tournament_id == tourn.id,
+            TournamentPayment.player_id == player.id
+        ).order_by(TournamentPayment.date.asc(), TournamentPayment.id.asc()).all()
+
+        prev_total = sum(p.amount for p in existing_payments)
+        dt = get_now_cdmx()
+
+        if new_total_paid == 0.0:
+            for p in existing_payments:
+                session.delete(p)
+            session.commit()
+        elif len(existing_payments) == 0:
+            new_p = TournamentPayment(
+                tournament_id=tourn.id,
+                player_id=player.id,
+                amount=new_total_paid,
+                payment_method="ajuste",
+                notes=notes or "Ajuste directo de total pagado",
+                date=dt
+            )
+            session.add(new_p)
+            session.commit()
+        elif len(existing_payments) == 1:
+            existing_payments[0].amount = new_total_paid
+            note_suffix = f" [Total corregido de ${prev_total:.2f} a ${new_total_paid:.2f}]"
+            existing_payments[0].notes = notes or ((existing_payments[0].notes or "") + note_suffix).strip()
+            existing_payments[0].date = dt
+            session.commit()
+        else:
+            for p in existing_payments:
+                session.delete(p)
+            new_p = TournamentPayment(
+                tournament_id=tourn.id,
+                player_id=player.id,
+                amount=new_total_paid,
+                payment_method="ajuste",
+                notes=notes or f"Total corregido a ${new_total_paid:.2f} (previo acumulado en varios abonos: ${prev_total:.2f})",
+                date=dt
+            )
+            session.add(new_p)
+            session.commit()
+
+        recalculate_tournament_quotas(tourn.id, session=session)
+        session.refresh(tp)
+
+        quota = tp.assigned_quota or 0.0
+        remaining = max(0.0, quota - new_total_paid)
+        is_paid_off = remaining <= 0.0 and quota > 0
+
+        result_data = {
+            "player_name": player.name,
+            "tournament_name": tourn.name,
+            "previous_total": prev_total,
+            "new_total_paid": new_total_paid,
+            "quota": quota,
+            "remaining": remaining,
+            "is_paid_off": is_paid_off
+        }
+        return True, f"Total pagado de {player.name} actualizado exitosamente de ${prev_total:.2f} a ${new_total_paid:.2f} MXN.", result_data
+    finally:
+        session.close()
+
+def delete_last_player_payment(tournament_id_or_name, player_name: str, 
+                               confirmed_player_id: int = None) -> tuple[bool, str, dict | None]:
+    """Deletes the most recent payment made by a player in a tournament."""
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return False, "Torneo no encontrado.", None
+
+        player = None
+        if confirmed_player_id:
+            player = session.query(Player).filter(Player.id == confirmed_player_id).first()
+
+        if not player:
+            status, matched_player, candidates = resolve_player_for_tournament(player_name, tournament_id=tourn.id, session=session)
+            if status == "EXACT":
+                player = matched_player
+            elif status == "SIMILAR_ONE":
+                sug = candidates[0]
+                jersey_str = f" (#{sug.jersey_number})" if sug.jersey_number else ""
+                return False, (
+                    f"⚠️ No encontré a '{player_name}' con nombre exacto, pero encontré a '{sug.name}'{jersey_str} en el torneo '{tourn.name}'. "
+                    f"¿Te refieres a él para eliminar su último pago?\n"
+                    f"Confírmamelo diciendo 'Sí, a {sug.name}'."
+                ), {"status": "SIMILAR_ONE", "suggested_player": sug.name, "suggested_id": sug.id}
+            elif status == "AMBIGUOUS":
+                names_str = ", ".join([f"'{c.name}'" + (f" (#{c.jersey_number})" if c.jersey_number else "") for c in candidates])
+                return False, (
+                    f"⚠️ Encontré varios jugadores con nombre similar en el torneo '{tourn.name}': {names_str}.\n"
+                    f"¿A cuál de ellos deseas eliminarle el último pago?"
+                ), {"status": "AMBIGUOUS", "candidates": [c.name for c in candidates]}
+            else:
+                return False, f"⚠️ No encontré al jugador '{player_name}' en el torneo '{tourn.name}'.", {"status": "NOT_FOUND"}
+
+        tp = session.query(TournamentPlayer).filter(
+            TournamentPlayer.tournament_id == tourn.id,
+            TournamentPlayer.player_id == player.id
+        ).first()
+
+        last_p = session.query(TournamentPayment).filter(
+            TournamentPayment.tournament_id == tourn.id,
+            TournamentPayment.player_id == player.id
+        ).order_by(TournamentPayment.date.desc(), TournamentPayment.id.desc()).first()
+
+        if not last_p:
+            return False, f"El jugador '{player.name}' no tiene pagos registrados en '{tourn.name}'.", None
+
+        deleted_amount = last_p.amount
+        session.delete(last_p)
+        session.commit()
+
+        recalculate_tournament_quotas(tourn.id, session=session)
+        if tp:
+            session.refresh(tp)
+
+        remaining_payments = session.query(TournamentPayment).filter(
+            TournamentPayment.tournament_id == tourn.id,
+            TournamentPayment.player_id == player.id
+        ).all()
+        new_total = sum(p.amount for p in remaining_payments)
+        quota = tp.assigned_quota if tp else 0.0
+        remaining = max(0.0, quota - new_total)
+        is_paid_off = remaining <= 0.0 and quota > 0
+
+        result_data = {
+            "player_name": player.name,
+            "tournament_name": tourn.name,
+            "deleted_amount": deleted_amount,
+            "new_total_paid": new_total,
+            "quota": quota,
+            "remaining": remaining,
+            "is_paid_off": is_paid_off
+        }
+        return True, f"Se eliminó el último pago de ${deleted_amount:.2f} MXN de {player.name}. Su nuevo total pagado es ${new_total:.2f} MXN.", result_data
+    finally:
+        session.close()
+
 def record_tournament_match(tournament_id_or_name, opponent: str, team_score: int, opponent_score: int, 
                             match_type: str = "jornada", notes: str = None, date_str: str = None) -> tuple[bool, str, dict | None]:
     """Records a game/match result for a tournament."""

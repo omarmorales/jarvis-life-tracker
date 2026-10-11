@@ -292,6 +292,56 @@ basket_tools = [
     {
         "type": "function",
         "function": {
+            "name": "modificar_total_pagado_jugador",
+            "description": "Modifica o corrige el total que ha pagado un jugador en un torneo (ej. si hubo una equivocación en el abono anterior, o se desea corregir la suma total pagada directamente a un monto específico).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "torneo": {
+                        "type": "string",
+                        "description": "Nombre o ID del torneo."
+                    },
+                    "jugador": {
+                        "type": "string",
+                        "description": "Nombre del jugador cuyo total pagado se desea modificar o corregir."
+                    },
+                    "nuevo_total_pagado": {
+                        "type": "number",
+                        "description": "Monto total correcto que el jugador debe tener registrado como pagado (ej. 300, 500, o 0 si no ha pagado nada)."
+                    },
+                    "notas": {
+                        "type": "string",
+                        "description": "Motivo opcional del ajuste o corrección (ej. 'error en monto previo', 'acuerdo')."
+                    }
+                },
+                "required": ["torneo", "jugador", "nuevo_total_pagado"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "eliminar_ultimo_pago_jugador",
+            "description": "Elimina o cancela el último pago/abono registrado de un jugador en un torneo (útil si se registró un pago por error y se quiere borrar).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "torneo": {
+                        "type": "string",
+                        "description": "Nombre o ID del torneo."
+                    },
+                    "jugador": {
+                        "type": "string",
+                        "description": "Nombre del jugador al que se le desea eliminar su último abono."
+                    }
+                },
+                "required": ["torneo", "jugador"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "registrar_partido",
             "description": "Registra el resultado de un partido de basketball (marcador, rival, tipo de partido).",
             "parameters": {
@@ -464,7 +514,8 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
             "8. Si un jugador se lesiona o sale, usa dar_de_baja_jugador y explica claramente al usuario cómo se congeló su saldo pagado y cómo se redistribuyó la diferencia entre los demás.\n"
             "9. Puedes asignar o actualizar números de camiseta/jersey ('Ponle el #23 a Omar' o al inscribir 'Agrega a Omar #23').\n"
             "10. Si el usuario pide eliminar un torneo, antes de eliminar pide confirmación explícita o llama a eliminar_torneo con confirmar=true si el usuario ya lo confirmó claramente.\n"
-            "11. REGLA ESTRICTA DE JUGADORES Y PAGOS: NUNCA crees un jugador nuevo automáticamente sin preguntar. Si el usuario escribe un nombre no exacto o abreviado (ej. 'Saul' en vez de 'Saúl Morales', o 'Chuy' cuando hay varios Chuys), registrar_pago buscará nombres similares y devolverá una advertencia o sugerencia. Pregúntale SIEMPRE al usuario para confirmar si se refiere a ese jugador sugerido antes de aplicar el pago. Solo si el usuario confirma explícitamente que es un jugador nuevo y separado debes activar crear_nuevo_jugador=true."
+            "11. REGLA ESTRICTA DE JUGADORES Y PAGOS: NUNCA crees un jugador nuevo automáticamente sin preguntar. Si el usuario escribe un nombre no exacto o abreviado (ej. 'Saul' en vez de 'Saúl Morales', o 'Chuy' cuando hay varios Chuys), registrar_pago buscará nombres similares y devolverá una advertencia o sugerencia. Pregúntale SIEMPRE al usuario para confirmar si se refiere a ese jugador sugerido antes de aplicar el pago. Solo si el usuario confirma explícitamente que es un jugador nuevo y separado debes activar crear_nuevo_jugador=true.\n"
+            "12. CORREGIR / EDITAR PAGOS DE JUGADORES: Si el usuario indica que se equivocó en lo que escribió de un pago, que desea modificar el total pagado de un jugador, o corregir un monto (ej. 'me equivoqué, Saúl pagó $300', 'modifica lo que ha pagado Saúl a $400', 'el total pagado de Saúl es $300', 'corrige el pago de Saúl'), utiliza SIEMPRE modificar_total_pagado_jugador. Si el usuario pide explícitamente borrar o cancelar el último pago, utiliza eliminar_ultimo_pago_jugador."
         )
     }
 
@@ -568,6 +619,37 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
                     if success and pdata:
                         status_str = "¡Totalmente pagado!" if pdata["is_paid_off"] else f"Resta pagar: ${pdata['remaining']:.2f}"
                         tool_content = f"Pago registrado: {pdata['player_name']} abonó ${pdata['amount_paid']:.2f} para '{pdata['tournament_name']}'. Total acumulado: ${pdata['total_paid']:.2f} de ${pdata['quota']:.2f}. {status_str}"
+                    else:
+                        tool_content = msg
+
+                elif fname == "modificar_total_pagado_jugador":
+                    success, msg, adata = database.adjust_player_total_paid(
+                        tournament_id_or_name=args["torneo"],
+                        player_name=args["jugador"],
+                        new_total_paid=args["nuevo_total_pagado"],
+                        notes=args.get("notas")
+                    )
+                    if success and adata:
+                        status_str = "¡Totalmente saldado!" if adata["is_paid_off"] else f"Resta pagar: ${adata['remaining']:.2f} MXN"
+                        tool_content = (
+                            f"✅ Total pagado corregido para {adata['player_name']} en '{adata['tournament_name']}': "
+                            f"cambió de ${adata['previous_total']:.2f} a ${adata['new_total_paid']:.2f} MXN. "
+                            f"Cuota asignada: ${adata['quota']:.2f} MXN. {status_str}"
+                        )
+                    else:
+                        tool_content = msg
+
+                elif fname == "eliminar_ultimo_pago_jugador":
+                    success, msg, ddata = database.delete_last_player_payment(
+                        tournament_id_or_name=args["torneo"],
+                        player_name=args["jugador"]
+                    )
+                    if success and ddata:
+                        status_str = "¡Totalmente saldado!" if ddata["is_paid_off"] else f"Resta pagar: ${ddata['remaining']:.2f} MXN"
+                        tool_content = (
+                            f"🗑️ Se eliminó el último pago de ${ddata['deleted_amount']:.2f} MXN de {ddata['player_name']} en '{ddata['tournament_name']}'. "
+                            f"Nuevo total pagado: ${ddata['new_total_paid']:.2f} MXN. {status_str}"
+                        )
                     else:
                         tool_content = msg
 

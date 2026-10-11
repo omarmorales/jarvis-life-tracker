@@ -97,6 +97,11 @@ class TournamentPaymentCreate(BaseModel):
     date: str = None
     force_create_player: bool = False
 
+class PlayerTotalPaidAdjust(BaseModel):
+    new_total_paid: float
+    notes: str = None
+    force_create_player: bool = False
+
 class TournamentMatchCreate(BaseModel):
     opponent: str
     team_score: int
@@ -1440,6 +1445,43 @@ def record_basket_payment(tournament_id: int, data: TournamentPaymentCreate):
         raise
     except Exception as e:
         logger.error(f"API Error recording payment: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.put("/api/basket/tournaments/{tournament_id}/players/{player_name}/adjust-paid", dependencies=[Depends(verify_api_token)])
+def adjust_player_paid(tournament_id: int, player_name: str, data: PlayerTotalPaidAdjust):
+    """Adjusts or corrects the total amount paid by a player in a tournament."""
+    try:
+        success, msg, adata = database.adjust_player_total_paid(
+            tournament_id_or_name=tournament_id,
+            player_name=player_name,
+            new_total_paid=data.new_total_paid,
+            notes=data.notes,
+            force_create_player=data.force_create_player
+        )
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return adata
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error adjusting player paid total: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.delete("/api/basket/tournaments/{tournament_id}/players/{player_name}/last-payment", dependencies=[Depends(verify_api_token)])
+def delete_player_last_payment(tournament_id: int, player_name: str):
+    """Deletes the most recent payment of a player in a tournament."""
+    try:
+        success, msg, ddata = database.delete_last_player_payment(
+            tournament_id_or_name=tournament_id,
+            player_name=player_name
+        )
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return ddata
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error deleting last payment: {e}")
         raise HTTPException(status_code=500, detail="Database error occurred.")
 
 @app.post("/api/basket/tournaments/{tournament_id}/matches", status_code=status.HTTP_201_CREATED, dependencies=[Depends(verify_api_token)])
