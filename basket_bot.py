@@ -227,7 +227,7 @@ basket_tools = [
         "type": "function",
         "function": {
             "name": "dar_de_baja_jugador",
-            "description": "Da de baja a un jugador por lesión o abandono del torneo. Congela su cuota en lo que ya pagó y redistribuye el saldo restante entre los jugadores activos restantes.",
+            "description": "Da de baja a un jugador por lesión o motivo personal (trabajo, mudanza). Congela su cuota en lo que ya pagó y redistribuye el saldo restante entre los demás jugadores activos. Úsalo ÚNICAMENTE cuando el jugador estuvo activo y luego no pudo continuar. NO lo uses si se agregó por error (para eso usa remover_jugador_de_torneo) ni para borrarlo de la base de datos (usa eliminar_jugador_completamente).",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -245,6 +245,48 @@ basket_tools = [
                     }
                 },
                 "required": ["torneo", "jugador"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "remover_jugador_de_torneo",
+            "description": "Quita o desinscribe a un jugador del roster de un torneo específico (ej. si se agregó por error o no jugará en este torneo). Recalcula las cuotas del equipo. El jugador sigue existiendo en el catálogo general de la base de datos para agregarlo a otro equipo o torneo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "torneo": {
+                        "type": "string",
+                        "description": "Nombre o ID del torneo del cual se quitará al jugador."
+                    },
+                    "jugador": {
+                        "type": "string",
+                        "description": "Nombre del jugador que se desea quitar del torneo."
+                    }
+                },
+                "required": ["torneo", "jugador"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "eliminar_jugador_completamente",
+            "description": "Elimina permanentemente a un jugador de TODA la base de datos (catálogo general de jugadores, torneos donde participe y sus pagos). Úsalo cuando el usuario pide borrar completamente al jugador de la base de datos porque se equivocó en crearlo o registrarlo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "jugador": {
+                        "type": "string",
+                        "description": "Nombre del jugador a eliminar definitivamente de la base de datos."
+                    },
+                    "confirmar": {
+                        "type": "boolean",
+                        "description": "True si el usuario confirmó explícitamente que desea eliminar al jugador definitivamente de la base de datos."
+                    }
+                },
+                "required": ["jugador", "confirmar"]
             }
         }
     },
@@ -511,11 +553,14 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
             "5. Si el usuario te da una lista de nombres (ej. 'Agrega a Juan #23 y Carlos #7'), llama a agregar_jugadores.\n"
             "6. Si te mencionan varios pagos en una misma frase (ej. 'Juan pagó $500 y Memo $600'), puedes llamar a registrar_pago para cada uno.\n"
             "7. Cuando consulten el estado de un torneo, presenta un resumen visual y ordenado con: Total Meta, Recaudado, Faltante, y el desglose de cada jugador (incluyendo su número de jersey si lo tiene, quién ya pagó al 100% y quién debe aún), más el récord de partidos si existen.\n"
-            "8. Si un jugador se lesiona o sale, usa dar_de_baja_jugador y explica claramente al usuario cómo se congeló su saldo pagado y cómo se redistribuyó la diferencia entre los demás.\n"
+            "8. BAJAS POR LESIÓN: Si un jugador estuvo activo y luego se lesiona o sale por trabajo/motivos personales, usa dar_de_baja_jugador y explica claramente cómo se congeló su saldo pagado y se redistribuyó la diferencia entre los demás.\n"
             "9. Puedes asignar o actualizar números de camiseta/jersey ('Ponle el #23 a Omar' o al inscribir 'Agrega a Omar #23').\n"
             "10. Si el usuario pide eliminar un torneo, antes de eliminar pide confirmación explícita o llama a eliminar_torneo con confirmar=true si el usuario ya lo confirmó claramente.\n"
             "11. REGLA ESTRICTA DE JUGADORES Y PAGOS: NUNCA crees un jugador nuevo automáticamente sin preguntar. Si el usuario escribe un nombre no exacto o abreviado (ej. 'Saul' en vez de 'Saúl Morales', o 'Chuy' cuando hay varios Chuys), registrar_pago buscará nombres similares y devolverá una advertencia o sugerencia. Pregúntale SIEMPRE al usuario para confirmar si se refiere a ese jugador sugerido antes de aplicar el pago. Solo si el usuario confirma explícitamente que es un jugador nuevo y separado debes activar crear_nuevo_jugador=true.\n"
-            "12. CORREGIR / EDITAR PAGOS DE JUGADORES: Si el usuario indica que se equivocó en lo que escribió de un pago, que desea modificar el total pagado de un jugador, o corregir un monto (ej. 'me equivoqué, Saúl pagó $300', 'modifica lo que ha pagado Saúl a $400', 'el total pagado de Saúl es $300', 'corrige el pago de Saúl'), utiliza SIEMPRE modificar_total_pagado_jugador. Si el usuario pide explícitamente borrar o cancelar el último pago, utiliza eliminar_ultimo_pago_jugador."
+            "12. CORREGIR / EDITAR PAGOS DE JUGADORES: Si el usuario indica que se equivocó en lo que escribió de un pago, que desea modificar el total pagado de un jugador, o corregir un monto (ej. 'me equivoqué, Saúl pagó $300', 'modifica lo que ha pagado Saúl a $400', 'el total pagado de Saúl es $300', 'corrige el pago de Saúl'), utiliza SIEMPRE modificar_total_pagado_jugador. Si el usuario pide explícitamente borrar o cancelar el último pago, utiliza eliminar_ultimo_pago_jugador.\n"
+            "13. QUITAR DEL TORNEO VS ELIMINAR DE LA BASE DE DATOS:\n"
+            "    a) Si el usuario agregó a un jugador a un torneo por error, o quiere quitarlo/sacarlo del torneo pero que el jugador siga existiendo para inscribirlo en otro equipo o torneo futuro (ej. 'quita a Carlos del torneo', 'me equivoqué y metí a Carlos a Ledom', 'saca a Memo de este equipo'), utiliza remover_jugador_de_torneo.\n"
+            "    b) Si el usuario quiere borrar completamente a un jugador de toda la base de datos (ej. 'elimina a Carlos de la base de datos', 'borra a Juan por completo porque lo registré por error'), utiliza eliminar_jugador_completamente con confirmar=true si es explícito o pide confirmación."
         )
     }
 
@@ -605,6 +650,30 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
                         tool_content = f"{msg} El saldo restante del torneo fue redistribuido. La nueva cuota para los jugadores activos es de ${new_quota:.2f} MXN."
                     else:
                         tool_content = f"Error: {msg}"
+
+                elif fname == "remover_jugador_de_torneo":
+                    success, msg, rdata = database.remove_player_from_tournament(args["torneo"], args["jugador"])
+                    if success and rdata:
+                        tool_content = (
+                            f"✅ Jugador {rdata['player_name']} removido del torneo '{rdata['tournament_name']}'. "
+                            f"El jugador continúa disponible en la base de datos para agregarse a otros equipos o torneos. "
+                            f"Nueva cuota recalculada para los jugadores activos: ${rdata['new_quota_per_active_player']:.2f} MXN."
+                        )
+                    else:
+                        tool_content = msg
+
+                elif fname == "eliminar_jugador_completamente":
+                    if not args.get("confirmar", False):
+                        tool_content = f"⚠️ ¿Estás seguro de que deseas eliminar permanentemente a '{args['jugador']}' de TODA la base de datos (se borrarán todos sus registros, cuotas y pagos)? Por favor confírmalo para proceder."
+                    else:
+                        success, msg, ddata = database.delete_player_completely(args["jugador"])
+                        if success and ddata:
+                            tool_content = (
+                                f"🗑️ Jugador {ddata['player_name']} eliminado completamente de la base de datos "
+                                f"(removido de {ddata['affected_tournaments_count']} torneo(s) y {ddata['payments_deleted']} pago(s) borrados)."
+                            )
+                        else:
+                            tool_content = msg
 
                 elif fname == "registrar_pago":
                     success, msg, pdata = database.record_tournament_payment(

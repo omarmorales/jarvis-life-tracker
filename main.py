@@ -1425,6 +1425,25 @@ def drop_player_endpoint(tournament_id: int, data: DropPlayerRequest):
         logger.error(f"API Error dropping player: {e}")
         raise HTTPException(status_code=500, detail="Database error occurred.")
 
+@app.delete("/api/basket/tournaments/{tournament_id}/players/{player_name}", dependencies=[Depends(verify_api_token)])
+def remove_player_from_tournament_endpoint(tournament_id: int, player_name: str):
+    """Removes a player from a tournament roster completely (without deleting them from the global database catalog)."""
+    try:
+        success, msg, rdata = database.remove_player_from_tournament(tournament_id, player_name)
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return {
+            "status": "success",
+            "message": msg,
+            "data": rdata,
+            "tournament": database.get_tournament_financial_report(tournament_id)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error removing player from tournament: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
 @app.post("/api/basket/tournaments/{tournament_id}/payments", status_code=status.HTTP_201_CREATED, dependencies=[Depends(verify_api_token)])
 def record_basket_payment(tournament_id: int, data: TournamentPaymentCreate):
     """Record an installment or payment from a player."""
@@ -1620,6 +1639,20 @@ async def basket_chat_endpoint(request: BasketChatRequest):
     except Exception as e:
         logger.error(f"API Error in /api/basket/chat: {e}")
         raise HTTPException(status_code=500, detail="Internal server error processing basket chat.")
+
+@app.delete("/api/basket/players/{player_name}", dependencies=[Depends(verify_api_token)])
+def delete_player_completely_endpoint(player_name: str):
+    """Permanently deletes a player from the entire database (including tournament rosters and payments)."""
+    try:
+        success, msg, ddata = database.delete_player_completely(player_name)
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return {"status": "success", "message": msg, "data": ddata}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error deleting player completely: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
 
 
 # ==========================================

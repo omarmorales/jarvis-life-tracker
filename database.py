@@ -644,6 +644,30 @@ def get_or_create_player(name: str, nickname: str = None, phone: str = None, ses
         if close_sess:
             session.close()
 
+def get_player(player_name_or_id, session = None) -> Player | None:
+    """Finds a player by ID or case-insensitive exact/normalized name."""
+    close_sess = False
+    if session is None:
+        session = get_session()
+        close_sess = True
+    try:
+        if isinstance(player_name_or_id, int) or (isinstance(player_name_or_id, str) and str(player_name_or_id).isdigit()):
+            p = session.query(Player).filter(Player.id == int(player_name_or_id)).first()
+            if p:
+                return p
+        clean = str(player_name_or_id).strip()
+        p = session.query(Player).filter(Player.name.ilike(clean)).first()
+        if not p:
+            q_norm = normalize_text(clean)
+            all_p = session.query(Player).all()
+            for cand in all_p:
+                if normalize_text(cand.name) == q_norm or (cand.nickname and normalize_text(cand.nickname) == q_norm):
+                    return cand
+        return p
+    finally:
+        if close_sess:
+            session.close()
+
 def get_all_players():
     """Retrieve all players from the catalog."""
     session = get_session()
@@ -1094,6 +1118,157 @@ def drop_player_from_tournament(tournament_id_or_name, player_name: str, reason:
         new_quota = active_tp.assigned_quota if active_tp else 0.0
             
         return True, f"Jugador {player.name} dado de baja ({tp.status}).", new_quota
+    finally:
+        session.close()
+
+def remove_player_from_tournament(tournament_id_or_name, player_name: str, 
+                                  confirmed_player_id: int = None) -> tuple[bool, str, dict | None]:
+    """Removes a player from a tournament roster completely (e.g. if enrolled by mistake), 
+    deleting their tournament membership and associated tournament payments, and recalculating active quotas.
+    Crucially keeps the player in the global database Player catalog so they can join other tournaments/teams.
+    """
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return False, "Torneo no encontrado.", None
+
+        player = None
+        if confirmed_player_id:
+            player = session.query(Player).filter(Player.id == confirmed_player_id).first()
+
+        if not player:
+            status, matched_player, candidates = resolve_player_for_tournament(player_name, tournament_id=tourn.id, session=session)
+            if status == "EXACT":
+                player = matched_player
+            elif status == "SIMILAR_ONE":
+                sug = candidates[0]
+                jersey_str = f" (#{sug.jersey_number})" if sug.jersey_number else ""
+                return False, (
+                    f"⚠️ No encontré a '{player_name}' con nombre exacto, pero encontré a '{sug.name}'{jersey_str} en el torneo '{tourn.name}'. "
+                    f"¿Te refieres a él para removerlo de este torneo?\n"
+                    f"Confírmamelo diciendo 'Sí, a {sug.name}'."
+                ), {"status": "SIMILAR_ONE", "suggested_player": sug.name, "suggested_id": sug.id}
+            elif status == "AMBIGUOUS":
+                names_str = ", ".join([f"'{c.name}'" + (f" (#{c.jersey_number})" if c.jersey_number else "") for c in candidates])
+                return False, (
+                    f"⚠️ Encontré varios jugadores con nombre similar en el torneo '{tourn.name}': {names_str}.\n"
+                    f"¿A cuál de ellos deseas remover del torneo?"
+                ), {"status": "AMBIGUOUS", "candidates": [c.name for c in candidates]}
+            else:
+                return False, f"⚠️ No encontré al jugador '{player_name}' en el torneo '{tourn.name}'.", {"status": "NOT_FOUND"}
+
+        tp = session.query(TournamentPlayer).filter(
+            TournamentPlayer.tournament_id == tourn.id,
+            TournamentPlayer.player_id == player.id
+        ).first()
+
+        if not tp:
+            return False, f"El jugador '{player.name}' no está inscrito en el torneo '{tourn.name}'.", None
+
+        # Clean up any payments recorded for this player in this tournament (since enrolled by mistake)
+        payments = session.query(TournamentPayment).filter(
+            TournamentPayment.tournament_id == tourn.id,
+            TournamentPayment.player_id == player.id
+        ).all()
+        total_payments_deleted = sum(p.amount for p in payments)
+        for p in payments:
+            session.delete(p)
+
+        session.delete(tp)
+        session.commit()
+
+        # Recalculate remaining active players' quotas
+        recalculate_tournament_quotas(tourn.id, session=session)
+
+        active_tp = session.query(TournamentPlayer).filter(
+            TournamentPlayer.tournament_id == tourn.id,
+            TournamentPlayer.status == 'active',
+            TournamentPlayer.has_custom_quota == 0
+        ).first()
+        new_quota = active_tp.assigned_quota if active_tp else 0.0
+
+        result_data = {
+            "player_id": player.id,
+            "player_name": player.name,
+            "tournament_id": tourn.id,
+            "tournament_name": tourn.name,
+            "new_quota_per_active_player": new_quota,
+            "removed_payments_total": total_payments_deleted,
+            "still_in_database": True
+        }
+        return True, (
+            f"✅ Jugador '{player.name}' removido exitosamente del torneo '{tourn.name}'. "
+            f"El jugador se mantiene en la base de datos para agregarlo a otro equipo o torneo. "
+            f"Nueva cuota recalculada por jugador activo: ${new_quota:.2f} MXN."
+        ), result_data
+    finally:
+        session.close()
+
+def delete_player_completely(player_name_or_id, confirmed_player_id: int = None) -> tuple[bool, str, dict | None]:
+    """Permanently deletes a player from the entire database (Player table, all tournament rosters, and payments)."""
+    session = get_session()
+    try:
+        player = None
+        if confirmed_player_id:
+            player = session.query(Player).filter(Player.id == confirmed_player_id).first()
+
+        if not player:
+            if isinstance(player_name_or_id, int) or (isinstance(player_name_or_id, str) and str(player_name_or_id).isdigit()):
+                player = session.query(Player).filter(Player.id == int(player_name_or_id)).first()
+
+        if not player:
+            name_str = str(player_name_or_id).strip()
+            candidates = find_matching_players(name_str, session=session)
+            if not candidates:
+                return False, f"⚠️ No se encontró al jugador '{name_str}' en la base de datos.", None
+
+            q_norm = normalize_text(name_str)
+            exact = [c for c in candidates if normalize_text(c.name) == q_norm or (c.nickname and normalize_text(c.nickname) == q_norm)]
+            if exact:
+                player = exact[0]
+            elif len(candidates) == 1:
+                sug = candidates[0]
+                jersey_str = f" (#{sug.jersey_number})" if sug.jersey_number else ""
+                return False, (
+                    f"⚠️ No encontré a '{name_str}' con nombre exacto, pero encontré a '{sug.name}'{jersey_str} en la base de datos. "
+                    f"¿Deseas eliminar completamente a '{sug.name}' de todo el sistema?\n"
+                    f"Confírmamelo diciendo 'Sí, elimina a {sug.name}'."
+                ), {"status": "SIMILAR_ONE", "suggested_player": sug.name, "suggested_id": sug.id}
+            else:
+                names_str = ", ".join([f"'{c.name}'" for c in candidates])
+                return False, (
+                    f"⚠️ Encontré varios jugadores con nombre similar en la base de datos: {names_str}.\n"
+                    f"¿A cuál de ellos deseas eliminar definitivamente?"
+                ), {"status": "AMBIGUOUS", "candidates": [c.name for c in candidates]}
+
+        player_id = player.id
+        player_name = player.name
+
+        rosters = session.query(TournamentPlayer).filter(TournamentPlayer.player_id == player_id).all()
+        affected_tourn_ids = list(set([r.tournament_id for r in rosters]))
+
+        payments_deleted = session.query(TournamentPayment).filter(TournamentPayment.player_id == player_id).delete(synchronize_session=False)
+        rosters_deleted = session.query(TournamentPlayer).filter(TournamentPlayer.player_id == player_id).delete(synchronize_session=False)
+
+        session.delete(player)
+        session.commit()
+
+        for t_id in affected_tourn_ids:
+            recalculate_tournament_quotas(t_id, session=session)
+
+        result_data = {
+            "player_id": player_id,
+            "player_name": player_name,
+            "affected_tournaments_count": len(affected_tourn_ids),
+            "payments_deleted": payments_deleted,
+            "rosters_deleted": rosters_deleted,
+            "completely_deleted": True
+        }
+        return True, (
+            f"🗑️ Jugador '{player_name}' eliminado permanentemente de la base de datos "
+            f"(removido de {len(affected_tourn_ids)} torneo(s) y {payments_deleted} pago(s) borrados)."
+        ), result_data
     finally:
         session.close()
 
