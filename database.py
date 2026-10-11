@@ -846,6 +846,13 @@ def get_tournament(tournament_id_or_name, session = None) -> Tournament | None:
         session = get_session()
         close_sess = True
     try:
+        if tournament_id_or_name is None or str(tournament_id_or_name).strip().lower() in ("", "none", "null", "actual", "activo", "default"):
+            active = session.query(Tournament).filter(Tournament.status == 'active').order_by(Tournament.created_at.desc()).all()
+            if active:
+                return active[0]
+            all_t = session.query(Tournament).order_by(Tournament.created_at.desc()).all()
+            return all_t[0] if all_t else None
+
         if isinstance(tournament_id_or_name, int) or (isinstance(tournament_id_or_name, str) and str(tournament_id_or_name).strip().isdigit()):
             t_id = int(tournament_id_or_name)
             return session.query(Tournament).filter(Tournament.id == t_id).first()
@@ -1015,8 +1022,8 @@ def add_players_to_tournament(tournament_id_or_name, player_names: list) -> tupl
         session.close()
 
 
-def set_player_jersey_number(player_name: str, jersey_number: int, tournament_id_or_name = None) -> tuple[bool, str]:
-    """Assigns or updates a player's jersey number globally and/or in a tournament."""
+def set_player_jersey_number(player_name: str, jersey_number: int, tournament_id_or_name = None, force: bool = False) -> tuple[bool, str]:
+    """Assigns or updates a player's jersey number globally and/or in a tournament, checking for teammate conflicts."""
     session = get_session()
     try:
         tourn = get_tournament(tournament_id_or_name, session=session) if tournament_id_or_name else None
@@ -1030,6 +1037,19 @@ def set_player_jersey_number(player_name: str, jersey_number: int, tournament_id
             return False, f"⚠️ Hay varios jugadores con nombre similar: {names_str}. Por favor especifica el nombre completo."
         else:
             return False, f"⚠️ No se encontró al jugador '{player_name}'."
+
+        if tourn and not force:
+            active_tps = session.query(TournamentPlayer).filter(
+                TournamentPlayer.tournament_id == tourn.id,
+                TournamentPlayer.player_id != player.id,
+                TournamentPlayer.status == 'active'
+            ).all()
+            for atp in active_tps:
+                p_cat = session.query(Player).filter(Player.id == atp.player_id).first()
+                eff_num = atp.jersey_number if atp.jersey_number is not None else (p_cat.jersey_number if p_cat else None)
+                if eff_num == jersey_number:
+                    conflict_name = p_cat.name if p_cat else f"Jugador #{atp.player_id}"
+                    return False, f"⚠️ El número #{jersey_number} ya está asignado a '{conflict_name}' en el equipo del torneo '{tourn.name}'. Si deseas reasignarlo de todas formas, confirma que deseas forzar el cambio."
 
         player.jersey_number = jersey_number
         if tourn:
@@ -1077,6 +1097,44 @@ def set_player_custom_quota(tournament_id_or_name, player_name: str, custom_quot
         session.commit()
         recalculate_tournament_quotas(tourn.id, session=session)
         return True, f"Cuota personalizada de ${custom_quota:.2f} asignada a {player.name}."
+    finally:
+        session.close()
+
+def reset_player_custom_quota(tournament_id_or_name, player_name: str) -> tuple[bool, str, dict | None]:
+    """Resets a player's quota from manual/custom back to the automatic equitative team calculation."""
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return False, "Torneo no encontrado.", None
+
+        status, player, candidates = resolve_player_for_tournament(player_name, tournament_id=tourn.id, session=session)
+        if status in ("EXACT", "SIMILAR_ONE") and candidates:
+            player = candidates[0]
+        elif status == "AMBIGUOUS":
+            names_str = ", ".join([f"'{c.name}'" for c in candidates])
+            return False, f"⚠️ Hay varios jugadores con nombre similar en {tourn.name}: {names_str}.", None
+        else:
+            return False, f"⚠️ No se encontró al jugador '{player_name}' en el torneo {tourn.name}.", None
+
+        tp = session.query(TournamentPlayer).filter(
+            TournamentPlayer.tournament_id == tourn.id,
+            TournamentPlayer.player_id == player.id
+        ).first()
+
+        if not tp:
+            return False, f"El jugador {player.name} no está inscrito en el torneo {tourn.name}.", None
+
+        tp.has_custom_quota = 0
+        session.commit()
+        recalculate_tournament_quotas(tourn.id, session=session)
+        session.refresh(tp)
+
+        return True, f"✅ Cuota personalizada removida para {player.name}. Ahora participa en el recálculo equitativo del equipo con una cuota de ${tp.assigned_quota:.2f} MXN.", {
+            "player_name": player.name,
+            "tournament_name": tourn.name,
+            "new_quota": tp.assigned_quota
+        }
     finally:
         session.close()
 
@@ -1628,6 +1686,188 @@ def record_tournament_match(tournament_id_or_name, opponent: str, team_score: in
             "record": f"{wins}G - {losses}P"
         }
         return True, "Partido registrado exitosamente.", match_data
+    finally:
+        session.close()
+
+def modify_last_tournament_match(tournament_id_or_name, opponent: str = None, 
+                                 team_score: int = None, opponent_score: int = None, 
+                                 match_type: str = None, notes: str = None, 
+                                 match_id: int = None) -> tuple[bool, str, dict | None]:
+    """Modifies or corrects an existing tournament match record (score, opponent, notes)."""
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return False, "Torneo no encontrado.", None
+
+        match = None
+        if match_id:
+            match = session.query(TournamentMatch).filter(
+                TournamentMatch.id == match_id,
+                TournamentMatch.tournament_id == tourn.id
+            ).first()
+        elif opponent:
+            match = session.query(TournamentMatch).filter(
+                TournamentMatch.tournament_id == tourn.id,
+                TournamentMatch.opponent.ilike(f"%{opponent.strip()}%")
+            ).order_by(TournamentMatch.date.desc(), TournamentMatch.id.desc()).first()
+        else:
+            match = session.query(TournamentMatch).filter(
+                TournamentMatch.tournament_id == tourn.id
+            ).order_by(TournamentMatch.date.desc(), TournamentMatch.id.desc()).first()
+
+        if not match:
+            return False, f"No se encontró ningún partido para corregir en '{tourn.name}'.", None
+
+        prev_score = f"{match.team_score} - {match.opponent_score} vs {match.opponent}"
+        if opponent:
+            match.opponent = opponent.strip()
+        if team_score is not None:
+            match.team_score = team_score
+        if opponent_score is not None:
+            match.opponent_score = opponent_score
+        if team_score is not None or opponent_score is not None:
+            match.is_win = 1 if match.team_score > match.opponent_score else 0
+        if match_type:
+            match.match_type = match_type
+        if notes:
+            match.notes = notes
+
+        session.commit()
+        session.refresh(match)
+
+        all_matches = session.query(TournamentMatch).filter(TournamentMatch.tournament_id == tourn.id).all()
+        wins = sum(1 for m in all_matches if m.is_win == 1)
+        losses = len(all_matches) - wins
+
+        match_data = {
+            "match_id": match.id,
+            "tournament_name": tourn.name,
+            "opponent": match.opponent,
+            "score": f"{match.team_score} - {match.opponent_score}",
+            "is_win": bool(match.is_win),
+            "match_type": match.match_type,
+            "record": f"{wins}G - {losses}P",
+            "previous_summary": prev_score
+        }
+        res_str = "Victoria" if match.is_win else "Derrota"
+        return True, (
+            f"✅ Partido corregido en '{tourn.name}': {res_str} {match.team_score} - {match.opponent_score} vs {match.opponent}. "
+            f"Récord del torneo: {wins}G - {losses}P."
+        ), match_data
+    finally:
+        session.close()
+
+def delete_last_tournament_match(tournament_id_or_name, opponent: str = None, 
+                                 match_id: int = None) -> tuple[bool, str, dict | None]:
+    """Deletes the latest recorded match (or a specific match against an opponent) and updates the record."""
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return False, "Torneo no encontrado.", None
+
+        match = None
+        if match_id:
+            match = session.query(TournamentMatch).filter(
+                TournamentMatch.id == match_id,
+                TournamentMatch.tournament_id == tourn.id
+            ).first()
+        elif opponent:
+            match = session.query(TournamentMatch).filter(
+                TournamentMatch.tournament_id == tourn.id,
+                TournamentMatch.opponent.ilike(f"%{opponent.strip()}%")
+            ).order_by(TournamentMatch.date.desc(), TournamentMatch.id.desc()).first()
+        else:
+            match = session.query(TournamentMatch).filter(
+                TournamentMatch.tournament_id == tourn.id
+            ).order_by(TournamentMatch.date.desc(), TournamentMatch.id.desc()).first()
+
+        if not match:
+            return False, f"No se encontró ningún partido para eliminar en '{tourn.name}'.", None
+
+        deleted_summary = f"vs {match.opponent} ({match.team_score} - {match.opponent_score})"
+        session.delete(match)
+        session.commit()
+
+        all_matches = session.query(TournamentMatch).filter(TournamentMatch.tournament_id == tourn.id).all()
+        wins = sum(1 for m in all_matches if m.is_win == 1)
+        losses = len(all_matches) - wins
+
+        return True, (
+            f"🗑️ Se eliminó el partido {deleted_summary} de '{tourn.name}'. "
+            f"Récord actualizado: {wins}G - {losses}P."
+        ), {"deleted_match": deleted_summary, "record": f"{wins}G - {losses}P"}
+    finally:
+        session.close()
+
+def get_player_payment_history(player_name: str, tournament_id_or_name = None) -> tuple[bool, str, dict | None]:
+    """Returns chronological itemized payment receipts and balances for a player."""
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session) if tournament_id_or_name else None
+        tourn_id = tourn.id if tourn else None
+        status, player, candidates = resolve_player_for_tournament(player_name, tournament_id=tourn_id, session=session)
+        if status in ("EXACT", "SIMILAR_ONE") and candidates:
+            player = candidates[0]
+        elif status == "AMBIGUOUS":
+            names_str = ", ".join([f"'{c.name}'" for c in candidates])
+            return False, f"⚠️ Hay varios jugadores con nombre similar: {names_str}.", None
+        else:
+            return False, f"⚠️ No se encontró al jugador '{player_name}'.", None
+
+        query = session.query(TournamentPayment).filter(TournamentPayment.player_id == player.id)
+        if tourn:
+            query = query.filter(TournamentPayment.tournament_id == tourn.id)
+        
+        payments = query.order_by(TournamentPayment.date.asc(), TournamentPayment.id.asc()).all()
+        tournaments_map = {t.id: t.name for t in session.query(Tournament).all()}
+        
+        history = []
+        running_total = 0.0
+        for p in payments:
+            running_total += p.amount
+            history.append({
+                "payment_id": p.id,
+                "tournament_name": tournaments_map.get(p.tournament_id, f"Torneo #{p.tournament_id}"),
+                "amount": p.amount,
+                "payment_method": p.payment_method,
+                "notes": p.notes or "",
+                "date": p.date.strftime("%Y-%m-%d %H:%M")
+            })
+
+        tp = None
+        if tourn:
+            tp = session.query(TournamentPlayer).filter(
+                TournamentPlayer.tournament_id == tourn.id,
+                TournamentPlayer.player_id == player.id
+            ).first()
+
+        quota = tp.assigned_quota if tp else 0.0
+        remaining = max(0.0, quota - running_total) if quota > 0 else 0.0
+
+        result_data = {
+            "player_id": player.id,
+            "player_name": player.name,
+            "total_paid": running_total,
+            "quota": quota,
+            "remaining": remaining,
+            "is_paid_off": remaining <= 0.0 and quota > 0,
+            "payments_count": len(payments),
+            "payments": history
+        }
+
+        if not history:
+            return True, f"El jugador '{player.name}' no tiene ningún abono o pago registrado aún.", result_data
+
+        lines = [f"• #{p['payment_id']}: ${p['amount']:.2f} ({p['payment_method']}) el {p['date']} [{p['tournament_name']}] {('- ' + p['notes']) if p['notes'] else ''}" for p in history]
+        msg = (
+            f"📋 Historial de pagos de {player.name} ({len(history)} abono(s)):\n" +
+            "\n".join(lines) +
+            f"\n\nTotal pagado: ${running_total:.2f} MXN." +
+            (f" Cuota: ${quota:.2f} MXN. Resta pagar: ${remaining:.2f} MXN." if quota > 0 else "")
+        )
+        return True, msg, result_data
     finally:
         session.close()
 

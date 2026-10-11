@@ -110,6 +110,13 @@ class TournamentMatchCreate(BaseModel):
     notes: str = None
     date: str = None
 
+class TournamentMatchUpdate(BaseModel):
+    opponent: str = None
+    team_score: int = None
+    opponent_score: int = None
+    match_type: str = None
+    notes: str = None
+
 class TournamentResultUpdate(BaseModel):
     playoff_seed: int = None
     final_result: str = None
@@ -1406,6 +1413,25 @@ def set_custom_quota_endpoint(tournament_id: int, data: CustomQuotaUpdate):
         logger.error(f"API Error setting custom quota: {e}")
         raise HTTPException(status_code=500, detail="Database error occurred.")
 
+@app.delete("/api/basket/tournaments/{tournament_id}/custom-quota/{player_name}", dependencies=[Depends(verify_api_token)])
+def reset_custom_quota_endpoint(tournament_id: int, player_name: str):
+    """Reset a player's quota back to automatic equitative calculation."""
+    try:
+        success, msg, data = database.reset_player_custom_quota(tournament_id, player_name)
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return {
+            "status": "success",
+            "message": msg,
+            "data": data,
+            "tournament": database.get_tournament_financial_report(tournament_id)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error resetting custom quota: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
 @app.post("/api/basket/tournaments/{tournament_id}/drop-player", dependencies=[Depends(verify_api_token)])
 def drop_player_endpoint(tournament_id: int, data: DropPlayerRequest):
     """Drop a player due to injury/leave, freezing their paid amount and recalculating active quotas."""
@@ -1525,6 +1551,41 @@ def record_basket_match(tournament_id: int, data: TournamentMatchCreate):
         logger.error(f"API Error recording match: {e}")
         raise HTTPException(status_code=500, detail="Database error occurred.")
 
+@app.put("/api/basket/tournaments/{tournament_id}/last-match", dependencies=[Depends(verify_api_token)])
+def modify_last_match_endpoint(tournament_id: int, data: TournamentMatchUpdate):
+    """Modify or correct the latest recorded match for a tournament."""
+    try:
+        success, msg, mdata = database.modify_last_tournament_match(
+            tournament_id_or_name=tournament_id,
+            opponent=data.opponent,
+            team_score=data.team_score,
+            opponent_score=data.opponent_score,
+            match_type=data.match_type,
+            notes=data.notes
+        )
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return {"status": "success", "message": msg, "data": mdata}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error modifying match: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.delete("/api/basket/tournaments/{tournament_id}/last-match", dependencies=[Depends(verify_api_token)])
+def delete_last_match_endpoint(tournament_id: int, opponent: str = None):
+    """Delete the latest recorded match (or match vs opponent) from a tournament."""
+    try:
+        success, msg, mdata = database.delete_last_tournament_match(tournament_id, opponent=opponent)
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return {"status": "success", "message": msg, "data": mdata}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error deleting match: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
 @app.put("/api/basket/tournaments/{tournament_id}/results", dependencies=[Depends(verify_api_token)])
 def update_tournament_result_endpoint(tournament_id: int, data: TournamentResultUpdate):
     """Update tournament playoff seed, final result or status."""
@@ -1624,6 +1685,55 @@ def get_basket_player_detail(player_name: str):
         raise
     except Exception as e:
         logger.error(f"API Error fetching player detail: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.get("/api/basket/players/{player_name}/payments", dependencies=[Depends(verify_api_token)])
+def get_player_payments_history_endpoint(player_name: str, tournament_id: int = None):
+    """Retrieve itemized payment receipts and running balance for a player."""
+    try:
+        success, msg, data = database.get_player_payment_history(player_name, tournament_id_or_name=tournament_id)
+        if not success:
+            raise HTTPException(status_code=404, detail=msg)
+        return {"status": "success", "message": msg, "data": data}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error fetching player payment history: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.get("/api/basket/tournaments/{tournament_id}/whatsapp-summary", dependencies=[Depends(verify_api_token)])
+def get_tournament_whatsapp_summary(tournament_id: int):
+    """Retrieve preformatted WhatsApp-ready text for team announcement."""
+    try:
+        rep = database.get_tournament_financial_report(tournament_id)
+        if not rep:
+            raise HTTPException(status_code=404, detail="Tournament not found.")
+        paid_off = [p for p in rep["active_players"] if p["is_paid_off"]]
+        pending = [p for p in rep["active_players"] if not p["is_paid_off"]]
+        t_name = rep["tournament"]["name"]
+        team_name = rep["tournament"]["team_name"]
+        total_cost = rep["financials"]["total_cost"]
+        total_coll = rep["financials"]["total_collected"]
+        pct = rep["financials"]["percentage_collected"]
+        quota = rep["active_players"][0]["assigned_quota"] if rep["active_players"] else 0.0
+
+        wa_text = (
+            f"🏀 *{t_name}* ({team_name})\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"💰 *Costo Total:* ${total_cost:,.2f} MXN\n"
+            f"👥 *Cuota por jugador:* ${quota:,.2f} MXN\n"
+            f"📊 *Recaudado:* ${total_coll:,.2f} de ${total_cost:,.2f} ({pct:.1f}%)\n"
+            f"🏆 *Récord:* {rep['record']['formatted']}\n\n"
+            f"✅ *PAGADO AL 100% ({len(paid_off)}):*\n{lines_paid}\n\n"
+            f"⏳ *PENDIENTES POR PAGAR ({len(pending)}):*\n{lines_pending}\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"¡Favor de ponerse al corriente con sus cuotas! 🏀🔥"
+        )
+        return {"status": "success", "whatsapp_message": wa_text}
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error generating WhatsApp summary: {e}")
         raise HTTPException(status_code=500, detail="Database error occurred.")
 
 @app.post("/api/basket/chat", dependencies=[Depends(verify_api_token)])

@@ -219,7 +219,28 @@ basket_tools = [
                         "description": "Monto fijo que deberá pagar este jugador."
                     }
                 },
-                "required": ["torneo", "jugador", "cuota"]
+                "required": ["jugador", "cuota"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "quitar_cuota_personalizada",
+            "description": "Quita la cuota manual/fija de un jugador para devolverlo al recálculo equitativo automático del equipo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "torneo": {
+                        "type": "string",
+                        "description": "Nombre o ID del torneo (opcional, si se omite usa el torneo activo actual)."
+                    },
+                    "jugador": {
+                        "type": "string",
+                        "description": "Nombre del jugador al que se le removerá la cuota fija."
+                    }
+                },
+                "required": ["jugador"]
             }
         }
     },
@@ -418,7 +439,59 @@ basket_tools = [
                         "description": "Fecha opcional en formato YYYY-MM-DD si fue un partido anterior."
                     }
                 },
-                "required": ["torneo", "rival", "puntos_favor", "puntos_contra"]
+                "required": ["rival", "puntos_favor", "puntos_contra"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "modificar_ultimo_partido",
+            "description": "Modifica o corrige el marcador, rival o notas del último partido registrado en el torneo (o de un rival específico).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "torneo": {
+                        "type": "string",
+                        "description": "Nombre o ID del torneo (opcional, si se omite usa el torneo activo actual)."
+                    },
+                    "rival": {
+                        "type": "string",
+                        "description": "Nombre del rival si se desea cambiar o buscar el partido contra él."
+                    },
+                    "puntos_favor": {
+                        "type": "integer",
+                        "description": "Nuevo puntaje de nuestro equipo."
+                    },
+                    "puntos_contra": {
+                        "type": "integer",
+                        "description": "Nuevo puntaje del rival."
+                    },
+                    "notas": {
+                        "type": "string",
+                        "description": "Notas actualizadas."
+                    }
+                }
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "eliminar_ultimo_partido",
+            "description": "Elimina o cancela el último partido registrado en el torneo (o de un rival específico) y actualiza el récord (G-P).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "torneo": {
+                        "type": "string",
+                        "description": "Nombre o ID del torneo (opcional, si se omite usa el torneo activo actual)."
+                    },
+                    "rival": {
+                        "type": "string",
+                        "description": "Nombre opcional del rival cuyo partido se desea borrar."
+                    }
+                }
             }
         }
     },
@@ -481,6 +554,43 @@ basket_tools = [
                     }
                 },
                 "required": ["jugador"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "consultar_historial_pagos_jugador",
+            "description": "Consulta el desglose cronológico de todos los abonos/pagos individuales realizados por un jugador (monto, fecha, método, notas).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "jugador": {
+                        "type": "string",
+                        "description": "Nombre del jugador a consultar."
+                    },
+                    "torneo": {
+                        "type": "string",
+                        "description": "Nombre o ID del torneo (opcional)."
+                    }
+                },
+                "required": ["jugador"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generar_mensaje_whatsapp_equipo",
+            "description": "Genera un mensaje con formato limpio y emojis listo para copiar y pegar en el grupo de WhatsApp del equipo (resumen financiero, cuotas por pagar y quién ya liquidó).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "torneo": {
+                        "type": "string",
+                        "description": "Nombre o ID del torneo (opcional, si se omite usa el torneo activo actual)."
+                    }
+                }
             }
         }
     },
@@ -560,7 +670,12 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
             "12. CORREGIR / EDITAR PAGOS DE JUGADORES: Si el usuario indica que se equivocó en lo que escribió de un pago, que desea modificar el total pagado de un jugador, o corregir un monto (ej. 'me equivoqué, Saúl pagó $300', 'modifica lo que ha pagado Saúl a $400', 'el total pagado de Saúl es $300', 'corrige el pago de Saúl'), utiliza SIEMPRE modificar_total_pagado_jugador. Si el usuario pide explícitamente borrar o cancelar el último pago, utiliza eliminar_ultimo_pago_jugador.\n"
             "13. QUITAR DEL TORNEO VS ELIMINAR DE LA BASE DE DATOS:\n"
             "    a) Si el usuario agregó a un jugador a un torneo por error, o quiere quitarlo/sacarlo del torneo pero que el jugador siga existiendo para inscribirlo en otro equipo o torneo futuro (ej. 'quita a Carlos del torneo', 'me equivoqué y metí a Carlos a Ledom', 'saca a Memo de este equipo'), utiliza remover_jugador_de_torneo.\n"
-            "    b) Si el usuario quiere borrar completamente a un jugador de toda la base de datos (ej. 'elimina a Carlos de la base de datos', 'borra a Juan por completo porque lo registré por error'), utiliza eliminar_jugador_completamente con confirmar=true si es explícito o pide confirmación."
+            "    b) Si el usuario quiere borrar completamente a un jugador de toda la base de datos (ej. 'elimina a Carlos de la base de datos', 'borra a Juan por completo porque lo registré por error'), utiliza eliminar_jugador_completamente con confirmar=true si es explícito o pide confirmación.\n"
+            "14. GESTIÓN Y CORRECCIÓN DE PARTIDOS: Si el usuario indica que se equivocó en el marcador de un partido o quiere cambiar los puntos/rival (ej. 'me equivoqué, quedamos 55 - 50 contra Lobos', 'corrige el marcador contra Lobos a 60 - 55'), usa modificar_ultimo_partido. Si pide borrar o cancelar un partido registrado, usa eliminar_ultimo_partido.\n"
+            "15. REVERTIR CUOTA PERSONALIZADA: Si el usuario pide que un jugador vuelva a pagar la cuota normal o quitarle la cuota fija (ej. 'quita la cuota fija de Saúl', 'Saúl ya pagará completo', 'regresa a Saúl a la cuota normal'), usa quitar_cuota_personalizada.\n"
+            "16. MENSAJE PARA WHATSAPP: Si el usuario pide un mensaje para el grupo de WhatsApp (ej. 'pásame el mensaje para el grupo', 'texto para whatsapp de cobranza'), llama a generar_mensaje_whatsapp_equipo y entrégale el mensaje perfectamente formateado con bloques limpios y emojis deportivos.\n"
+            "17. HISTORIAL DE PAGOS: Si piden saber cuándo o cómo pagó un jugador (ej. '¿cómo ha pagado Saúl?', 'enséñame los abonos de Saúl'), usa consultar_historial_pagos_jugador.\n"
+            "18. CONTEXTO POR DEFECTO: Si el usuario no menciona el nombre del torneo y solo hay un torneo activo registrado, utiliza automáticamente ese torneo activo sin pedirle al usuario que repita el nombre."
         )
     }
 
@@ -641,7 +756,11 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
                         tool_content = f"Error: {msg}"
 
                 elif fname == "asignar_cuota_personalizada":
-                    success, msg = database.set_player_custom_quota(args["torneo"], args["jugador"], args["cuota"])
+                    success, msg = database.set_player_custom_quota(args.get("torneo"), args["jugador"], args["cuota"])
+                    tool_content = msg if success else f"Error: {msg}"
+
+                elif fname == "quitar_cuota_personalizada":
+                    success, msg, qdata = database.reset_player_custom_quota(args.get("torneo"), args["jugador"])
                     tool_content = msg if success else f"Error: {msg}"
 
                 elif fname == "dar_de_baja_jugador":
@@ -724,7 +843,7 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
 
                 elif fname == "registrar_partido":
                     success, msg, mdata = database.record_tournament_match(
-                        tournament_id_or_name=args["torneo"],
+                        tournament_id_or_name=args.get("torneo"),
                         opponent=args["rival"],
                         team_score=args["puntos_favor"],
                         opponent_score=args["puntos_contra"],
@@ -737,6 +856,23 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
                         tool_content = f"Partido registrado: {res} vs {mdata['opponent']} ({mdata['score']}). Récord del torneo: {mdata['record']}."
                     else:
                         tool_content = f"Error: {msg}"
+
+                elif fname == "modificar_ultimo_partido":
+                    success, msg, mdata = database.modify_last_tournament_match(
+                        tournament_id_or_name=args.get("torneo"),
+                        opponent=args.get("rival"),
+                        team_score=args.get("puntos_favor"),
+                        opponent_score=args.get("puntos_contra"),
+                        notes=args.get("notas")
+                    )
+                    tool_content = msg if success else f"Error: {msg}"
+
+                elif fname == "eliminar_ultimo_partido":
+                    success, msg, mdata = database.delete_last_tournament_match(
+                        tournament_id_or_name=args.get("torneo"),
+                        opponent=args.get("rival")
+                    )
+                    tool_content = msg if success else f"Error: {msg}"
 
                 elif fname == "actualizar_resultado_torneo":
                     t = database.update_tournament_result(
@@ -777,11 +913,48 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
                     else:
                         tool_content = json.dumps(psummary, ensure_ascii=False)
 
+                elif fname == "consultar_historial_pagos_jugador":
+                    success, msg, hdata = database.get_player_payment_history(
+                        player_name=args["jugador"],
+                        tournament_id_or_name=args.get("torneo")
+                    )
+                    tool_content = msg
+
+                elif fname == "generar_mensaje_whatsapp_equipo":
+                    rep = database.get_tournament_financial_report(args.get("torneo"))
+                    if not rep:
+                        tool_content = "Torneo no encontrado para generar mensaje de WhatsApp."
+                    else:
+                        paid_off = [p for p in rep["active_players"] if p["is_paid_off"]]
+                        pending = [p for p in rep["active_players"] if not p["is_paid_off"]]
+                        t_name = rep["tournament"]["name"]
+                        team_name = rep["tournament"]["team_name"]
+                        total_cost = rep["financials"]["total_cost"]
+                        total_coll = rep["financials"]["total_collected"]
+                        pct = rep["financials"]["percentage_collected"]
+                        quota = rep["active_players"][0]["assigned_quota"] if rep["active_players"] else 0.0
+                        lines_paid = "\n".join([f"  ✅ {p['name']}" + (f" (#{p['jersey_number']})" if p['jersey_number'] is not None else "") for p in paid_off]) or "  (Aún ninguno)"
+                        lines_pending = "\n".join([f"  ⏳ {p['name']}" + (f" (#{p['jersey_number']})" if p['jersey_number'] is not None else "") + f": resta ${p['balance_due']:.2f}" for p in pending]) or "  (¡Todos al corriente!)"
+
+                        tool_content = (
+                            f"🏀 *{t_name}* ({team_name})\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"💰 *Costo Total:* ${total_cost:,.2f} MXN\n"
+                            f"👥 *Cuota por jugador:* ${quota:,.2f} MXN\n"
+                            f"📊 *Recaudado:* ${total_coll:,.2f} de ${total_cost:,.2f} ({pct:.1f}%)\n"
+                            f"🏆 *Récord:* {rep['record']['formatted']}\n\n"
+                            f"✅ *PAGADO AL 100% ({len(paid_off)}):*\n{lines_paid}\n\n"
+                            f"⏳ *PENDIENTES POR PAGAR ({len(pending)}):*\n{lines_pending}\n"
+                            f"━━━━━━━━━━━━━━━━━━━━\n"
+                            f"¡Favor de ponerse al corriente con sus cuotas! 🏀🔥"
+                        )
+
                 elif fname == "asignar_numero_jugador":
                     success, msg = database.set_player_jersey_number(
                         player_name=args["jugador"],
                         jersey_number=args["numero"],
-                        tournament_id_or_name=args.get("torneo")
+                        tournament_id_or_name=args.get("torneo"),
+                        force=args.get("forzar", False)
                     )
                     tool_content = msg if success else f"Error: {msg}"
 
