@@ -103,14 +103,18 @@ class PlayerTotalPaidAdjust(BaseModel):
     force_create_player: bool = False
 
 class TournamentMatchCreate(BaseModel):
-    opponent: str
-    team_score: int
-    opponent_score: int
+    resultado: str = None
+    is_win: bool = None
+    opponent: str = None
+    team_score: int = None
+    opponent_score: int = None
     match_type: str = "jornada"
     notes: str = None
     date: str = None
 
 class TournamentMatchUpdate(BaseModel):
+    resultado: str = None
+    is_win: bool = None
     opponent: str = None
     team_score: int = None
     opponent_score: int = None
@@ -1535,9 +1539,11 @@ def record_basket_match(tournament_id: int, data: TournamentMatchCreate):
     try:
         success, msg, mdata = database.record_tournament_match(
             tournament_id_or_name=tournament_id,
+            resultado=data.resultado,
             opponent=data.opponent,
             team_score=data.team_score,
             opponent_score=data.opponent_score,
+            is_win=data.is_win,
             match_type=data.match_type,
             notes=data.notes,
             date_str=data.date
@@ -1557,9 +1563,11 @@ def modify_last_match_endpoint(tournament_id: int, data: TournamentMatchUpdate):
     try:
         success, msg, mdata = database.modify_last_tournament_match(
             tournament_id_or_name=tournament_id,
+            resultado=data.resultado,
             opponent=data.opponent,
             team_score=data.team_score,
             opponent_score=data.opponent_score,
+            is_win=data.is_win,
             match_type=data.match_type,
             notes=data.notes
         )

@@ -151,16 +151,17 @@ class TournamentMatch(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     tournament_id = Column(Integer, nullable=False)
-    opponent = Column(String, nullable=False)
-    team_score = Column(Integer, nullable=False)
-    opponent_score = Column(Integer, nullable=False)
+    opponent = Column(String, default='Rival no especificado', nullable=True)
+    team_score = Column(Integer, nullable=True)
+    opponent_score = Column(Integer, nullable=True)
     is_win = Column(Integer, nullable=False)  # 1 win, 0 loss
     match_type = Column(String, default='jornada')  # 'jornada', 'cuartos', 'semifinal', 'final', 'amistoso'
     notes = Column(String, nullable=True)
     date = Column(DateTime, default=get_now_cdmx)
 
     def __repr__(self):
-        return f"<TournamentMatch(id={self.id}, vs='{self.opponent}', score={self.team_score}-{self.opponent_score}, win={self.is_win})>"
+        score_str = f"{self.team_score}-{self.opponent_score}" if self.team_score is not None and self.opponent_score is not None else ("Win" if self.is_win else "Loss")
+        return f"<TournamentMatch(id={self.id}, vs='{self.opponent}', score={score_str}, win={self.is_win})>"
 
 
 # Create all tables in the engine (equivalent to "CREATE TABLE IF NOT EXISTS")
@@ -193,6 +194,21 @@ except Exception:
 try:
     with engine.begin() as conn:
         conn.execute(text("ALTER TABLE basket_tournament_players ADD COLUMN jersey_number INTEGER"))
+except Exception:
+    pass
+
+# Make opponent and scores nullable in basket_tournament_matches (flexible match tracking)
+try:
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE basket_tournament_matches ALTER COLUMN opponent DROP NOT NULL"))
+        conn.execute(text("ALTER TABLE basket_tournament_matches ALTER COLUMN opponent SET DEFAULT 'Rival no especificado'"))
+except Exception:
+    pass
+
+try:
+    with engine.begin() as conn:
+        conn.execute(text("ALTER TABLE basket_tournament_matches ALTER COLUMN team_score DROP NOT NULL"))
+        conn.execute(text("ALTER TABLE basket_tournament_matches ALTER COLUMN opponent_score DROP NOT NULL"))
 except Exception:
     pass
 
@@ -1723,14 +1739,34 @@ def delete_last_player_payment(tournament_id_or_name, player_name: str,
     finally:
         session.close()
 
-def record_tournament_match(tournament_id_or_name, opponent: str, team_score: int, opponent_score: int, 
-                            match_type: str = "jornada", notes: str = None, date_str: str = None) -> tuple[bool, str, dict | None]:
-    """Records a game/match result for a tournament."""
+def record_tournament_match(tournament_id_or_name, 
+                            resultado: str = None, 
+                            opponent: str = None, 
+                            team_score: int = None, 
+                            opponent_score: int = None, 
+                            is_win: bool = None,
+                            match_type: str = "jornada", 
+                            notes: str = None, 
+                            date_str: str = None) -> tuple[bool, str, dict | None]:
+    """Records a game/match result for a tournament. Outcome (is_win/resultado) and date are mandatory; opponent and scores are optional."""
     session = get_session()
     try:
         tourn = get_tournament(tournament_id_or_name, session=session)
         if not tourn:
             return False, "Torneo no encontrado.", None
+
+        # Determine win/loss
+        is_win_val = None
+        if is_win is not None:
+            is_win_val = 1 if is_win else 0
+        elif resultado:
+            res_clean = str(resultado).lower().strip()
+            is_win_val = 1 if any(w in res_clean for w in ["vic", "gan", "win", "triunf", "w"]) else 0
+        elif team_score is not None and opponent_score is not None:
+            is_win_val = 1 if team_score > opponent_score else 0
+
+        if is_win_val is None:
+            return False, "Debes indicar si el partido se ganó o se perdió ('victoria' o 'derrota') o proporcionar el marcador de puntos.", None
 
         dt = get_now_cdmx()
         if date_str:
@@ -1739,14 +1775,15 @@ def record_tournament_match(tournament_id_or_name, opponent: str, team_score: in
             except ValueError:
                 pass
 
-        is_win = 1 if team_score > opponent_score else 0
+        clean_opponent = opponent.strip() if opponent and opponent.strip() else "Rival no especificado"
+
         match = TournamentMatch(
             tournament_id=tourn.id,
-            opponent=opponent.strip(),
+            opponent=clean_opponent,
             team_score=team_score,
             opponent_score=opponent_score,
-            is_win=is_win,
-            match_type=match_type,
+            is_win=is_win_val,
+            match_type=match_type or "jornada",
             notes=notes,
             date=dt
         )
@@ -1758,24 +1795,37 @@ def record_tournament_match(tournament_id_or_name, opponent: str, team_score: in
         wins = sum(1 for m in all_matches if m.is_win == 1)
         losses = len(all_matches) - wins
         
+        score_display = f"{team_score} - {opponent_score}" if team_score is not None and opponent_score is not None else ("Victoria" if is_win_val == 1 else "Derrota")
+        res_str = "Victoria" if is_win_val == 1 else "Derrota"
+        opp_str = f" vs {clean_opponent}" if clean_opponent != "Rival no especificado" else ""
+        score_detail = f" ({team_score} - {opponent_score})" if team_score is not None and opponent_score is not None else ""
+
         match_data = {
             "match_id": match.id,
             "tournament_name": tourn.name,
             "opponent": match.opponent,
-            "score": f"{team_score} - {opponent_score}",
-            "is_win": bool(is_win),
-            "match_type": match_type,
-            "record": f"{wins}G - {losses}P"
+            "score": score_display,
+            "team_score": team_score,
+            "opponent_score": opponent_score,
+            "is_win": bool(is_win_val),
+            "match_type": match.match_type,
+            "record": f"{wins}G - {losses}P",
+            "date": dt.strftime("%Y-%m-%d")
         }
-        return True, "Partido registrado exitosamente.", match_data
+        return True, f"Partido registrado: {res_str}{opp_str}{score_detail}. Récord del torneo '{tourn.name}': {wins}G - {losses}P.", match_data
     finally:
         session.close()
 
-def modify_last_tournament_match(tournament_id_or_name, opponent: str = None, 
-                                 team_score: int = None, opponent_score: int = None, 
-                                 match_type: str = None, notes: str = None, 
+def modify_last_tournament_match(tournament_id_or_name, 
+                                 resultado: str = None,
+                                 opponent: str = None, 
+                                 team_score: int = None, 
+                                 opponent_score: int = None, 
+                                 is_win: bool = None,
+                                 match_type: str = None, 
+                                 notes: str = None, 
                                  match_id: int = None) -> tuple[bool, str, dict | None]:
-    """Modifies or corrects an existing tournament match record (score, opponent, notes)."""
+    """Modifies or corrects an existing tournament match record (score, opponent, notes, outcome)."""
     session = get_session()
     try:
         tourn = get_tournament(tournament_id_or_name, session=session)
@@ -1801,15 +1851,22 @@ def modify_last_tournament_match(tournament_id_or_name, opponent: str = None,
         if not match:
             return False, f"No se encontró ningún partido para corregir en '{tourn.name}'.", None
 
-        prev_score = f"{match.team_score} - {match.opponent_score} vs {match.opponent}"
+        prev_score = f"{match.team_score} - {match.opponent_score} vs {match.opponent}" if match.team_score is not None and match.opponent_score is not None else f"{'Victoria' if match.is_win else 'Derrota'} vs {match.opponent}"
         if opponent:
             match.opponent = opponent.strip()
         if team_score is not None:
             match.team_score = team_score
         if opponent_score is not None:
             match.opponent_score = opponent_score
-        if team_score is not None or opponent_score is not None:
+
+        if is_win is not None:
+            match.is_win = 1 if is_win else 0
+        elif resultado:
+            res_clean = str(resultado).lower().strip()
+            match.is_win = 1 if any(w in res_clean for w in ["vic", "gan", "win", "triunf", "w"]) else 0
+        elif team_score is not None and opponent_score is not None:
             match.is_win = 1 if match.team_score > match.opponent_score else 0
+
         if match_type:
             match.match_type = match_type
         if notes:
@@ -1822,19 +1879,25 @@ def modify_last_tournament_match(tournament_id_or_name, opponent: str = None,
         wins = sum(1 for m in all_matches if m.is_win == 1)
         losses = len(all_matches) - wins
 
+        score_display = f"{match.team_score} - {match.opponent_score}" if match.team_score is not None and match.opponent_score is not None else ("Victoria" if match.is_win else "Derrota")
+        res_str = "Victoria" if match.is_win else "Derrota"
+        opp_str = f" vs {match.opponent}" if match.opponent and match.opponent != "Rival no especificado" else ""
+        score_detail = f" ({match.team_score} - {match.opponent_score})" if match.team_score is not None and match.opponent_score is not None else ""
+
         match_data = {
             "match_id": match.id,
             "tournament_name": tourn.name,
             "opponent": match.opponent,
-            "score": f"{match.team_score} - {match.opponent_score}",
+            "score": score_display,
+            "team_score": match.team_score,
+            "opponent_score": match.opponent_score,
             "is_win": bool(match.is_win),
             "match_type": match.match_type,
             "record": f"{wins}G - {losses}P",
             "previous_summary": prev_score
         }
-        res_str = "Victoria" if match.is_win else "Derrota"
         return True, (
-            f"✅ Partido corregido en '{tourn.name}': {res_str} {match.team_score} - {match.opponent_score} vs {match.opponent}. "
+            f"✅ Partido corregido en '{tourn.name}': {res_str}{opp_str}{score_detail}. "
             f"Récord del torneo: {wins}G - {losses}P."
         ), match_data
     finally:
@@ -1868,7 +1931,9 @@ def delete_last_tournament_match(tournament_id_or_name, opponent: str = None,
         if not match:
             return False, f"No se encontró ningún partido para eliminar en '{tourn.name}'.", None
 
-        deleted_summary = f"vs {match.opponent} ({match.team_score} - {match.opponent_score})"
+        score_part = f"({match.team_score} - {match.opponent_score})" if match.team_score is not None and match.opponent_score is not None else ("(Victoria)" if match.is_win else "(Derrota)")
+        opp_part = f"vs {match.opponent}" if match.opponent and match.opponent != "Rival no especificado" else ""
+        deleted_summary = f"{opp_part} {score_part}".strip()
         session.delete(match)
         session.commit()
 

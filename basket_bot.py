@@ -406,25 +406,30 @@ basket_tools = [
         "type": "function",
         "function": {
             "name": "registrar_partido",
-            "description": "Registra el resultado de un partido de basketball (marcador, rival, tipo de partido).",
+            "description": "Registra el resultado de un partido de basketball jugado. Lo ÚNICO OBLIGATORIO es indicar si se ganó o se perdió ('resultado': 'victoria'/'derrota') y la fecha (si no se indica, usa la fecha actual). El rival y el marcador de puntos son TOTALMENTE OPCIONALES por si no se recuerdan.",
             "parameters": {
                 "type": "object",
                 "properties": {
+                    "resultado": {
+                        "type": "string",
+                        "enum": ["victoria", "derrota"],
+                        "description": "Obligatorio: 'victoria' si ganamos o 'derrota' si perdimos (también se deduce del marcador si este se incluye)."
+                    },
                     "torneo": {
                         "type": "string",
-                        "description": "Nombre o ID del torneo."
+                        "description": "Nombre o ID del torneo (opcional si hay un único torneo activo)."
                     },
                     "rival": {
                         "type": "string",
-                        "description": "Nombre del equipo rival (ej. 'Lobos', 'Bulls')."
+                        "description": "Nombre del equipo rival si se conoce (opcional, ej. 'Lobos', 'Bulls'). Si no se conoce o no se dice, omitir."
                     },
                     "puntos_favor": {
                         "type": "integer",
-                        "description": "Puntos anotados por nuestro equipo."
+                        "description": "Puntos anotados por nuestro equipo (opcional si no se recuerda el marcador exacto)."
                     },
                     "puntos_contra": {
                         "type": "integer",
-                        "description": "Puntos anotados por el rival."
+                        "description": "Puntos anotados por el rival (opcional si no se recuerda el marcador exacto)."
                     },
                     "tipo_partido": {
                         "type": "string",
@@ -436,10 +441,10 @@ basket_tools = [
                     },
                     "fecha": {
                         "type": "string",
-                        "description": "Fecha opcional en formato YYYY-MM-DD si fue un partido anterior."
+                        "description": "Fecha opcional en formato YYYY-MM-DD si fue un partido pasado (ej. 'ayer', 'el domingo pasado'). Si fue hoy o no se especifica, omitir."
                     }
                 },
-                "required": ["rival", "puntos_favor", "puntos_contra"]
+                "required": ["resultado"]
             }
         }
     },
@@ -447,13 +452,18 @@ basket_tools = [
         "type": "function",
         "function": {
             "name": "modificar_ultimo_partido",
-            "description": "Modifica o corrige el marcador, rival o notas del último partido registrado en el torneo (o de un rival específico).",
+            "description": "Modifica o corrige el resultado, marcador, rival o notas del último partido registrado en el torneo (o de un rival específico).",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "torneo": {
                         "type": "string",
                         "description": "Nombre o ID del torneo (opcional, si se omite usa el torneo activo actual)."
+                    },
+                    "resultado": {
+                        "type": "string",
+                        "enum": ["victoria", "derrota"],
+                        "description": "Corregir si fue 'victoria' o 'derrota' si se registró al revés."
                     },
                     "rival": {
                         "type": "string",
@@ -469,7 +479,7 @@ basket_tools = [
                     },
                     "notas": {
                         "type": "string",
-                        "description": "Notas actualizadas."
+                        "description": "Nuevas notas."
                     }
                 }
             }
@@ -671,7 +681,7 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
             "13. QUITAR DEL TORNEO VS ELIMINAR DE LA BASE DE DATOS:\n"
             "    a) Si el usuario agregó a un jugador a un torneo por error, o quiere quitarlo/sacarlo del torneo pero que el jugador siga existiendo para inscribirlo en otro equipo o torneo futuro (ej. 'quita a Carlos del torneo', 'me equivoqué y metí a Carlos a Ledom', 'saca a Memo de este equipo'), utiliza remover_jugador_de_torneo.\n"
             "    b) Si el usuario quiere borrar completamente a un jugador de toda la base de datos (ej. 'elimina a Carlos de la base de datos', 'borra a Juan por completo porque lo registré por error'), utiliza eliminar_jugador_completamente con confirmar=true si es explícito o pide confirmación.\n"
-            "14. GESTIÓN Y CORRECCIÓN DE PARTIDOS: Si el usuario indica que se equivocó en el marcador de un partido o quiere cambiar los puntos/rival (ej. 'me equivoqué, quedamos 55 - 50 contra Lobos', 'corrige el marcador contra Lobos a 60 - 55'), usa modificar_ultimo_partido. Si pide borrar o cancelar un partido registrado, usa eliminar_ultimo_partido.\n"
+            "14. GESTIÓN Y REGISTRO DE PARTIDOS: Para registrar un partido, LO ÚNICO OBLIGATORIO es saber si se ganó o se perdió ('resultado': 'victoria' o 'derrota') y la fecha (por defecto la fecha actual, o la que indique el usuario como 'el domingo pasado' o 'ayer'). El nombre del rival y el marcador de puntos son TOTALMENTE OPCIONALES (ejemplos: 'Ganamos hoy', 'Perdimos el domingo', 'Ganamos vs Bulls', 'Ganamos 65 a 50 contra Lobos' son todas válidas). Si el usuario se equivocó en el resultado o marcador, usa modificar_ultimo_partido. Si pide borrar o cancelar un partido registrado, usa eliminar_ultimo_partido.\n"
             "15. REVERTIR CUOTA PERSONALIZADA: Si el usuario pide que un jugador vuelva a pagar la cuota normal o quitarle la cuota fija (ej. 'quita la cuota fija de Saúl', 'Saúl ya pagará completo', 'regresa a Saúl a la cuota normal'), usa quitar_cuota_personalizada.\n"
             "16. MENSAJE PARA WHATSAPP: Si el usuario pide un mensaje para el grupo de WhatsApp (ej. 'pásame el mensaje para el grupo', 'texto para whatsapp de cobranza'), llama a generar_mensaje_whatsapp_equipo y entrégale el mensaje perfectamente formateado con bloques limpios y emojis deportivos.\n"
             "17. HISTORIAL DE PAGOS: Si piden saber cuándo o cómo pagó un jugador (ej. '¿cómo ha pagado Saúl?', 'enséñame los abonos de Saúl'), usa consultar_historial_pagos_jugador.\n"
@@ -869,22 +879,20 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
                 elif fname == "registrar_partido":
                     success, msg, mdata = database.record_tournament_match(
                         tournament_id_or_name=args.get("torneo"),
-                        opponent=args["rival"],
-                        team_score=args["puntos_favor"],
-                        opponent_score=args["puntos_contra"],
+                        resultado=args.get("resultado"),
+                        opponent=args.get("rival"),
+                        team_score=args.get("puntos_favor"),
+                        opponent_score=args.get("puntos_contra"),
                         match_type=args.get("tipo_partido", "jornada"),
                         notes=args.get("notas"),
                         date_str=args.get("fecha")
                     )
-                    if success and mdata:
-                        res = "Victoria" if mdata["is_win"] else "Derrota"
-                        tool_content = f"Partido registrado: {res} vs {mdata['opponent']} ({mdata['score']}). Récord del torneo: {mdata['record']}."
-                    else:
-                        tool_content = f"Error: {msg}"
+                    tool_content = msg if success else f"Error: {msg}"
 
                 elif fname == "modificar_ultimo_partido":
                     success, msg, mdata = database.modify_last_tournament_match(
                         tournament_id_or_name=args.get("torneo"),
+                        resultado=args.get("resultado"),
                         opponent=args.get("rival"),
                         team_score=args.get("puntos_favor"),
                         opponent_score=args.get("puntos_contra"),
