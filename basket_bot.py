@@ -254,7 +254,7 @@ basket_tools = [
                 "properties": {
                     "torneo": {
                         "type": "string",
-                        "description": "Nombre o ID del torneo."
+                        "description": "Nombre o ID del torneo. Si no se especifica, se toma el torneo activo actual."
                     },
                     "jugador": {
                         "type": "string",
@@ -265,7 +265,28 @@ basket_tools = [
                         "description": "Motivo de la baja (ej. 'lesión', 'cambio de ciudad'). Por defecto 'lesion'."
                     }
                 },
-                "required": ["torneo", "jugador"]
+                "required": ["jugador"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "reactivar_jugador",
+            "description": "Reactiva a un jugador en el torneo que estaba inactivo o dado de baja por lesión o motivo personal (cuando ya se recuperó de su lesión o regresó al equipo). Lo regresa a estado activo y recalcula las cuotas equitativamente entre todos los jugadores activos del equipo.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "torneo": {
+                        "type": "string",
+                        "description": "Nombre o ID del torneo. Si no se especifica, se toma el torneo activo actual."
+                    },
+                    "jugador": {
+                        "type": "string",
+                        "description": "Nombre del jugador que se desea reactivar."
+                    }
+                },
+                "required": ["jugador"]
             }
         }
     },
@@ -673,7 +694,7 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
             "5. Si el usuario te da una lista de nombres (ej. 'Agrega a Juan #23 y Carlos #7'), llama a agregar_jugadores.\n"
             "6. ABONOS NORMALES DE JUGADORES (REGLA POR DEFECTO): Cualquier mensaje como 'Pago de [Jugador] [Monto]', 'Abono de [Jugador] [Monto]', '[Jugador] pagó [Monto]', '[Jugador] dio [Monto]', o listas de pagos (ej. 'Marentes 300, Chuy 200') es SIEMPRE un abono normal que se SUMA al historial del jugador usando 'registrar_pago'. Llama a registrar_pago para cada uno.\n"
             "7. Cuando consulten el estado de un torneo, presenta un resumen visual y ordenado con: Total Meta, Recaudado, Faltante, y el desglose de cada jugador (incluyendo su número de jersey si lo tiene, quién ya pagó al 100% y quién debe aún), más el récord de partidos si existen.\n"
-            "8. BAJAS POR LESIÓN: Si un jugador estuvo activo y luego se lesiona o sale por trabajo/motivos personales, usa dar_de_baja_jugador y explica claramente cómo se congeló su saldo pagado y se redistribuyó la diferencia entre los demás.\n"
+            "8. BAJAS POR LESIÓN Y REACTIVACIÓN: Si un jugador estuvo activo y se lesiona o sale por trabajo/motivos personales, usa 'dar_de_baja_jugador' y explica cómo se congeló su saldo pagado y se redistribuyó el resto. Si el jugador ya se recuperó de su lesión o regresa al equipo (ej. 'ya se recuperó', 'vuelve a jugar', 'reactiva a [Jugador]'), usa 'reactivar_jugador' para regresarlo a estado activo y recalcular las cuotas equitativamente entre los jugadores activos.\n"
             "9. Puedes asignar o actualizar números de camiseta/jersey ('Ponle el #23 a Omar' o al inscribir 'Agrega a Omar #23').\n"
             "10. Si el usuario pide eliminar un torneo, antes de eliminar pide confirmación explícita o llama a eliminar_torneo con confirmar=true si el usuario ya lo confirmó claramente.\n"
             "11. REGLA ESTRICTA DE JUGADORES Y PAGOS: NUNCA crees un jugador nuevo automáticamente sin preguntar. Si el usuario escribe un nombre no exacto o abreviado (ej. 'Saul' en vez de 'Saúl Morales', o 'Chuy' cuando hay varios Chuys), registrar_pago buscará nombres similares y devolverá una advertencia o sugerencia. Pregúntale SIEMPRE al usuario para confirmar si se refiere a ese jugador sugerido antes de aplicar el pago. Solo si el usuario confirma explícitamente que es un jugador nuevo y separado debes activar crear_nuevo_jugador=true.\n"
@@ -777,14 +798,25 @@ async def run_basket_ai(chat_id: int, user_text: str) -> str:
                     tool_content = msg if success else f"Error: {msg}"
 
                 elif fname == "dar_de_baja_jugador":
-                    success, msg, new_quota = database.drop_player_from_tournament(args["torneo"], args["jugador"], args.get("motivo", "lesion"))
+                    success, msg, new_quota = database.drop_player_from_tournament(args.get("torneo"), args["jugador"], args.get("motivo", "lesion"))
                     if success:
                         tool_content = f"{msg} El saldo restante del torneo fue redistribuido. La nueva cuota para los jugadores activos es de ${new_quota:.2f} MXN."
                     else:
                         tool_content = f"Error: {msg}"
 
+                elif fname == "reactivar_jugador":
+                    success, msg, rdata = database.reactivate_player_in_tournament(args.get("torneo"), args["jugador"])
+                    if success and rdata:
+                        tool_content = (
+                            f"🏀 ¡{rdata['player_name']} ha sido reactivado en el torneo '{rdata['tournament_name']}'! "
+                            f"Vuelve a contar como jugador activo del equipo. "
+                            f"La nueva cuota recalculada para los {rdata['total_active_players']} jugadores activos es de ${rdata['new_quota_per_active_player']:.2f} MXN."
+                        )
+                    else:
+                        tool_content = msg
+
                 elif fname == "remover_jugador_de_torneo":
-                    success, msg, rdata = database.remove_player_from_tournament(args["torneo"], args["jugador"])
+                    success, msg, rdata = database.remove_player_from_tournament(args.get("torneo"), args["jugador"])
                     if success and rdata:
                         tool_content = (
                             f"✅ Jugador {rdata['player_name']} removido del torneo '{rdata['tournament_name']}'. "

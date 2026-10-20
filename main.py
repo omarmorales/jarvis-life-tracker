@@ -84,6 +84,9 @@ class DropPlayerRequest(BaseModel):
     player_name: str
     reason: str = "lesion"
 
+class ReactivatePlayerRequest(BaseModel):
+    player_name: str
+
 class PlayerJerseyUpdate(BaseModel):
     player_name: str
     jersey_number: int
@@ -1459,6 +1462,25 @@ def drop_player_endpoint(tournament_id: int, data: DropPlayerRequest):
         raise
     except Exception as e:
         logger.error(f"API Error dropping player: {e}")
+        raise HTTPException(status_code=500, detail="Database error occurred.")
+
+@app.post("/api/basket/tournaments/{tournament_id}/reactivate-player", dependencies=[Depends(verify_api_token)])
+def reactivate_player_endpoint(tournament_id: int, data: ReactivatePlayerRequest):
+    """Reactivates an injured or dropped out player, setting status back to 'active' and recalculating quotas equitably."""
+    try:
+        success, msg, rdata = database.reactivate_player_in_tournament(tournament_id, data.player_name)
+        if not success:
+            raise HTTPException(status_code=400, detail=msg)
+        return {
+            "status": "success",
+            "message": msg,
+            "data": rdata,
+            "tournament": database.get_tournament_financial_report(tournament_id)
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"API Error reactivating player: {e}")
         raise HTTPException(status_code=500, detail="Database error occurred.")
 
 @app.delete("/api/basket/tournaments/{tournament_id}/players/{player_name}", dependencies=[Depends(verify_api_token)])

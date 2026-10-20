@@ -1109,6 +1109,7 @@ def add_players_to_tournament(tournament_id_or_name, player_names: list) -> tupl
                     tp.jersey_number = jersey_num
                 if tp.status != 'active':
                     tp.status = 'active'
+                    tp.notes = None
                     added_count += 1
                 else:
                     existing_count += 1
@@ -1261,7 +1262,8 @@ def drop_player_from_tournament(tournament_id_or_name, player_name: str, reason:
         if not tp:
             return False, f"El jugador {player.name} no está en este torneo.", 0.0
             
-        tp.status = 'injured' if 'lesion' in reason.lower() else 'dropped_out'
+        r_lower = reason.lower()
+        tp.status = 'injured' if ('lesion' in r_lower or 'lesión' in r_lower) else 'dropped_out'
         tp.notes = reason
         session.commit()
         recalculate_tournament_quotas(tourn.id, session=session)
@@ -1274,6 +1276,89 @@ def drop_player_from_tournament(tournament_id_or_name, player_name: str, reason:
         new_quota = active_tp.assigned_quota if active_tp else 0.0
             
         return True, f"Jugador {player.name} dado de baja ({tp.status}).", new_quota
+    finally:
+        session.close()
+
+def reactivate_player_in_tournament(tournament_id_or_name, player_name: str, 
+                                    confirmed_player_id: int = None) -> tuple[bool, str, dict | None]:
+    """Reactivates an injured or dropped out player in a tournament, setting status back to 'active' 
+    and recalculating quotas equitably among all active players.
+    """
+    session = get_session()
+    try:
+        tourn = get_tournament(tournament_id_or_name, session=session)
+        if not tourn:
+            return False, "Torneo no encontrado.", None
+
+        player = None
+        if confirmed_player_id:
+            player = session.query(Player).filter(Player.id == confirmed_player_id).first()
+
+        if not player:
+            status, matched_player, candidates = resolve_player_for_tournament(player_name, tournament_id=tourn.id, session=session)
+            if status == "EXACT":
+                player = matched_player
+            elif status == "SIMILAR_ONE":
+                sug = candidates[0]
+                jersey_str = f" (#{sug.jersey_number})" if sug.jersey_number else ""
+                return False, (
+                    f"⚠️ No encontré a '{player_name}' con nombre exacto, pero encontré a '{sug.name}'{jersey_str} en el torneo '{tourn.name}'. "
+                    f"¿Te refieres a él para reactivarlo?\n"
+                    f"Confírmamelo diciendo 'Sí, a {sug.name}'."
+                ), {"status": "SIMILAR_ONE", "suggested_player": sug.name, "suggested_id": sug.id}
+            elif status == "AMBIGUOUS":
+                names_str = ", ".join([f"'{c.name}'" + (f" (#{c.jersey_number})" if c.jersey_number else "") for c in candidates])
+                return False, (
+                    f"⚠️ Encontré varios jugadores con nombre similar en el torneo '{tourn.name}': {names_str}.\n"
+                    f"¿A cuál de ellos deseas reactivar?"
+                ), {"status": "AMBIGUOUS", "candidates": [c.name for c in candidates]}
+            else:
+                return False, f"⚠️ No encontré al jugador '{player_name}' en el torneo '{tourn.name}'.", {"status": "NOT_FOUND"}
+
+        tp = session.query(TournamentPlayer).filter(
+            TournamentPlayer.tournament_id == tourn.id,
+            TournamentPlayer.player_id == player.id
+        ).first()
+
+        if not tp:
+            return False, f"El jugador '{player.name}' no está inscrito en el torneo '{tourn.name}'.", None
+
+        if tp.status == 'active':
+            return False, f"El jugador '{player.name}' ya se encuentra como activo en el torneo '{tourn.name}'.", None
+
+        prev_status = tp.status
+        tp.status = 'active'
+        tp.notes = None
+        session.commit()
+        recalculate_tournament_quotas(tourn.id, session=session)
+
+        # Retrieve newly recalculated quota for regular active players
+        active_tp = session.query(TournamentPlayer).filter(
+            TournamentPlayer.tournament_id == tourn.id,
+            TournamentPlayer.status == 'active',
+            TournamentPlayer.has_custom_quota == 0
+        ).first()
+        new_quota = active_tp.assigned_quota if active_tp else 0.0
+
+        all_active = session.query(TournamentPlayer).filter(
+            TournamentPlayer.tournament_id == tourn.id,
+            TournamentPlayer.status == 'active'
+        ).all()
+
+        rdata = {
+            "player_id": player.id,
+            "player_name": player.name,
+            "tournament_id": tourn.id,
+            "tournament_name": tourn.name,
+            "previous_status": prev_status,
+            "new_status": "active",
+            "new_quota_per_active_player": new_quota,
+            "total_active_players": len(all_active)
+        }
+        return True, (
+            f"✅ ¡Jugador {player.name} reactivado exitosamente en '{tourn.name}'! "
+            f"Vuelve a estar activo en el equipo y la nueva cuota recalculada para los jugadores activos es de ${new_quota:.2f} MXN."
+        ), rdata
     finally:
         session.close()
 
